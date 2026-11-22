@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use admet_calc::{
-    ApplicabilityDomainStatus, MetabolismRisk, MoleculeEvaluation, QsarTaskKind, TppPreset,
-    TppStatus,
+    ApplicabilityDomainStatus, MetabolismRisk, MoleculeEvaluation, PkRoute, PkSimulationConfig,
+    QsarTaskKind, TppPreset, TppStatus,
 };
 use admet_engine::{
     AdmetSession, Command, CommandRegistry, FilterCriteria, MAX_READ_BYTES, PathSandbox,
 };
+use admet_qsar::simulate_human_pk_dose;
 use admet_report::{ExportFormat, write_report_to_writer};
 use chem_core::{
     Molecule, ensure_2d_coords, parse_csv_batch, parse_sdf, parse_smiles, parse_smiles_batch,
@@ -40,6 +41,8 @@ struct AdmetCraftApp {
     dark_mode: bool,
     show_egg_names: bool,
     show_som_overlay: bool,
+    pk_potency_nm: f64,
+    pk_route: PkRoute,
     palette_open: bool,
     palette_query: String,
     import_path: String,
@@ -88,6 +91,8 @@ impl AdmetCraftApp {
             dark_mode: false,
             show_egg_names: true,
             show_som_overlay: true,
+            pk_potency_nm: 10.0,
+            pk_route: PkRoute::Oral,
             palette_open: false,
             palette_query: String::new(),
             import_path: String::new(),
@@ -1098,6 +1103,121 @@ impl AdmetCraftApp {
 
                 ui.add_space(8.0);
                 render_admet_sections(ui, &eval);
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new("Human PK / Minimal-PBPK Dose Simulator (v1.2)")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Target IC50 / Ki (nM):");
+                            ui.add(
+                                egui::DragValue::new(&mut self.pk_potency_nm)
+                                    .speed(0.5)
+                                    .range(0.1..=5000.0),
+                            );
+                            ui.separator();
+                            ui.label("Route:");
+                            ui.selectable_value(&mut self.pk_route, PkRoute::Oral, "Oral");
+                            ui.selectable_value(&mut self.pk_route, PkRoute::Iv, "IV");
+                            ui.selectable_value(&mut self.pk_route, PkRoute::Sc, "SC");
+                        });
+                        let pk_rep = simulate_human_pk_dose(
+                            &eval,
+                            &PkSimulationConfig {
+                                target_potency_nm: self.pk_potency_nm,
+                                route: self.pk_route,
+                                ..Default::default()
+                            },
+                        );
+                        kv_grid(
+                            ui,
+                            "pbpk_grid",
+                            &[
+                                ("Recommended Regimen", pk_rep.recommended_regimen.clone()),
+                                ("BCS Classification", pk_rep.bcs_class.as_str().to_string()),
+                                (
+                                    "Oral Bioavailability (F)",
+                                    format!(
+                                        "{:.1}% (Fa={:.2}, Fg={:.2}, Fh={:.2})",
+                                        pk_rep.oral_bioavailability_f * 100.0,
+                                        pk_rep.fa,
+                                        pk_rep.fg,
+                                        pk_rep.fh
+                                    ),
+                                ),
+                                (
+                                    "CL_tot / V_d,ss / t1/2",
+                                    format!(
+                                        "{:.2} mL/min/kg | {:.2} L/kg | {:.1} h (fup={:.3})",
+                                        pk_rep.cl_total_ml_min_kg,
+                                        pk_rep.vdss_l_kg,
+                                        pk_rep.t_half_ivive_h,
+                                        pk_rep.fup
+                                    ),
+                                ),
+                                (
+                                    "QD Dose (90% CI)",
+                                    format!(
+                                        "{:.1} mg/d ({:.0}-{:.0} mg) | Cmax,u={:.1} nM | hERG Margin={:.0}x",
+                                        pk_rep.qd.daily_dose_mg,
+                                        pk_rep.qd.daily_dose_ci90_mg[0],
+                                        pk_rep.qd.daily_dose_ci90_mg[1],
+                                        pk_rep.qd.cmax_u_nm,
+                                        pk_rep.qd.herg_safety_margin
+                                    ),
+                                ),
+                                (
+                                    "BID Dose (90% CI)",
+                                    format!(
+                                        "{:.1} mg q12h ({:.0}-{:.0} mg/d) | {}",
+                                        pk_rep.bid.dose_mg_per_admin,
+                                        pk_rep.bid.daily_dose_ci90_mg[0],
+                                        pk_rep.bid.daily_dose_ci90_mg[1],
+                                        pk_rep.bid.feasibility
+                                    ),
+                                ),
+                            ],
+                        );
+                        // Compact live egui sparkline of steady-state C_u(t) vs IC50
+                        if pk_rep.steady_state_curve.len() >= 2 {
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::new(460.0, 120.0), Sense::hover());
+                            let painter = ui.painter_at(rect);
+                            let bg = if self.dark_mode {
+                                Color32::from_rgb(24, 28, 36)
+                            } else {
+                                Color32::from_rgb(248, 250, 252)
+                            };
+                            painter.rect_filled(rect, 4.0, bg);
+                            let max_y = pk_rep
+                                .steady_state_curve
+                                .iter()
+                                .map(|p| p.cu_p95_nm.max(p.cu_median_nm))
+                                .fold(self.pk_potency_nm * 2.0, f64::max)
+                                * 1.1;
+                            let map_pt = |t: f64, c: f64| -> egui::Pos2 {
+                                let x = rect.left() + 8.0 + ((t / 48.0).clamp(0.0, 1.0) as f32) * (rect.width() - 16.0);
+                                let y = rect.bottom() - 8.0 - ((c / max_y.max(1.0)).clamp(0.0, 1.0) as f32) * (rect.height() - 16.0);
+                                egui::pos2(x, y)
+                            };
+                            let y_ic50 = map_pt(0.0, self.pk_potency_nm).y;
+                            painter.line_segment(
+                                [egui::pos2(rect.left() + 8.0, y_ic50), egui::pos2(rect.right() - 8.0, y_ic50)],
+                                egui::Stroke::new(1.2_f32, Color32::from_rgb(22, 163, 74)),
+                            );
+                            let pts: Vec<egui::Pos2> = pk_rep
+                                .steady_state_curve
+                                .iter()
+                                .map(|p| map_pt(p.time_h, p.cu_median_nm))
+                                .collect();
+                            painter.add(egui::Shape::line(
+                                pts,
+                                egui::Stroke::new(2.0_f32, Color32::from_rgb(37, 99, 235)),
+                            ));
+                        }
+                        for w in &pk_rep.warnings {
+                            ui.colored_label(Color32::from_rgb(185, 110, 20), format!("• {w}"));
+                        }
+                    });
             });
     }
 

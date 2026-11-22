@@ -4,16 +4,19 @@ mod mcp;
 
 use std::path::PathBuf;
 
-use admet_calc::{MoleculeEvaluation, QsarTaskKind, TppPreset};
+use admet_calc::{MoleculeEvaluation, PkRoute, PkSimulationConfig, QsarTaskKind, TppPreset};
 use admet_engine::{MAX_READ_BYTES, PathSandbox};
 use admet_qsar::{
     AdmetModelPack, DEFAULT_MAX_METABOLITES, EvalOptions, GbdtTrainConfig, SeaOffTargetIndex,
     build_sea_index_from_tsv, compare_smiles_auto, default_model_pack_path, default_sea_index_path,
-    evaluate_batch_auto_with_options, evaluate_smiles_auto, load_default_model_pack,
-    load_default_sea_index, predict_metabolism_sites, run_metabolite_guard, tdc_raw_dir,
+    dg_kcal_to_ki_nm, evaluate_batch_auto_with_options, evaluate_smiles_auto,
+    load_default_model_pack, load_default_sea_index, predict_metabolism_sites,
+    render_pk_dose_markdown, run_metabolite_guard, simulate_human_pk_dose, tdc_raw_dir,
     train_tdc_model_pack,
 };
-use admet_report::{ExportFormat, write_report_file, write_report_to_writer};
+use admet_report::{
+    ExportFormat, render_pk_profile_svg, write_report_file, write_report_to_writer,
+};
 use chem_core::{parse_csv_batch, parse_sdf, parse_smiles, parse_smiles_batch};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -33,6 +36,24 @@ impl From<CliTpp> for TppPreset {
             CliTpp::Cns => TppPreset::CnsPenetrant,
             CliTpp::Peripheral => TppPreset::PeripheralSelective,
             CliTpp::Oncology => TppPreset::OncologyKinase,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum CliPkRoute {
+    #[default]
+    Oral,
+    Iv,
+    Sc,
+}
+
+impl From<CliPkRoute> for PkRoute {
+    fn from(value: CliPkRoute) -> Self {
+        match value {
+            CliPkRoute::Oral => PkRoute::Oral,
+            CliPkRoute::Iv => PkRoute::Iv,
+            CliPkRoute::Sc => PkRoute::Sc,
         }
     }
 }
@@ -174,6 +195,47 @@ enum Commands {
         /// Optional explicit model pack path (defaults to CRAFT_DATA_DIR/models/admetcraft_v1/admetcraft_tdc_v1.json).
         #[arg(long)]
         model_pack: Option<PathBuf>,
+    },
+    /// Mechanistic IVIVE -> Minimal-PBPK human pharmacokinetics & therapeutic dose prediction (QD/BID + 90% conformal CI + SVG curve).
+    PkDose {
+        /// SMILES string (or "SMILES Name").
+        smiles: String,
+        /// Optional molecule name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Target biochemical/cellular potency (`IC50` / `Ki`) in nM (overridden if `--dg-kcal` is passed).
+        #[arg(long, default_value_t = 10.0)]
+        potency_nm: f64,
+        /// Optional binding free energy `ΔG` in kcal/mol (converted to `Ki` nM at 298.15 K).
+        #[arg(long, allow_hyphen_values = true)]
+        dg_kcal: Option<f64>,
+        /// Required unbound concentration multiple of `IC50`/`Ki` (default `1.0`).
+        #[arg(long, default_value_t = 1.0)]
+        fold: f64,
+        /// Match steady-state average unbound concentration (`Cavg,u`) instead of trough (`Cmin,u`).
+        #[arg(long)]
+        match_average: bool,
+        /// Dosing route (`oral` | `iv` | `sc`).
+        #[arg(long, value_enum, default_value = "oral")]
+        route: CliPkRoute,
+        /// Adult body weight in kg (default `70.0`).
+        #[arg(long, default_value_t = 70.0)]
+        body_weight: f64,
+        /// Target Product Profile preset for baseline evaluation.
+        #[arg(long, value_enum, default_value = "oral")]
+        tpp: CliTpp,
+        /// Optional JSON output path for complete `PbpkHumanDoseReport`.
+        #[arg(long)]
+        out_json: Option<PathBuf>,
+        /// Optional standalone SVG output path for steady-state `C_u(t)` profile with 90% CI ribbon.
+        #[arg(long)]
+        out_svg: Option<PathBuf>,
+        /// Optional Markdown report output path.
+        #[arg(long)]
+        out_md: Option<PathBuf>,
+        /// Print raw JSON on stdout instead of Markdown summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Start the Model Context Protocol (MCP) server on stdio or TCP.
     Mcp {
@@ -451,6 +513,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "No local TDC QSAR model pack found at {}. Run `admetcraft-cli train-qsar` first.",
                     default_model_pack_path().display()
                 );
+            }
+        }
+        Commands::PkDose {
+            smiles,
+            name,
+            potency_nm,
+            dg_kcal,
+            fold,
+            match_average,
+            route,
+            body_weight,
+            tpp,
+            out_json,
+            out_svg,
+            out_md,
+            json,
+        } => {
+            let (smi, final_name) = split_smiles_and_name(&smiles, name.as_deref());
+            let eval = evaluate_smiles_auto(smi, final_name, tpp.into())?;
+            let eff_potency = dg_kcal.map_or(potency_nm.max(0.01), dg_kcal_to_ki_nm);
+            let cfg = PkSimulationConfig {
+                target_potency_nm: eff_potency,
+                target_fold: fold.max(0.1),
+                match_trough: !match_average,
+                route: route.into(),
+                body_weight_kg: body_weight.clamp(10.0, 200.0),
+                ..Default::default()
+            };
+            let report = simulate_human_pk_dose(&eval, &cfg);
+            if let Some(jp) = &out_json {
+                if let Some(par) = jp.parent()
+                    && !par.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(par)?;
+                }
+                std::fs::write(jp, serde_json::to_string_pretty(&report)?)?;
+            }
+            if let Some(sp) = &out_svg {
+                if let Some(par) = sp.parent()
+                    && !par.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(par)?;
+                }
+                std::fs::write(sp, render_pk_profile_svg(&report))?;
+            }
+            let md = render_pk_dose_markdown(&report);
+            if let Some(mp) = &out_md {
+                if let Some(par) = mp.parent()
+                    && !par.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(par)?;
+                }
+                std::fs::write(mp, &md)?;
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{md}");
             }
         }
         Commands::Mcp {
@@ -864,7 +984,7 @@ mod tests {
         let tools = lines[4]["result"]["tools"]
             .as_array()
             .ok_or("tools must be array")?;
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         for t in tools {
             assert!(
                 t.get("outputSchema").is_some(),
@@ -1032,6 +1152,8 @@ mod tests {
             serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}).to_string(),
             serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"predict_metabolites","arguments":{"smiles":"CC(=O)Nc1ccc(O)cc1","name":"Paracetamol"}}}).to_string(),
             serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"predict_offtargets","arguments":{"smiles":"O=C(CCCN1CCC(O)(c2ccc(Cl)cc2)CC1)c1ccc(F)cc1","name":"Haloperidol"}}}).to_string(),
+            serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"predict_human_pk_dose","arguments":{"smiles":"CC(C)Cc1ccc(C(C)C(=O)O)cc1","name":"Ibuprofen","potency_nm":50.0,"out_svg_path":"ibu_pk.svg"}}}).to_string(),
+            serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"predict_human_pk_dose","arguments":{"smiles":"CCO","out_svg_path":"../escape.svg"}}}).to_string(),
         ].join("\n") + "\n";
 
         let mut out_buf = Vec::new();
@@ -1042,7 +1164,7 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(serde_json::from_str)
             .collect::<Result<_, _>>()?;
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 5);
         assert_eq!(lines[1]["result"]["isError"], false);
         assert!(
             lines[1]["result"]["structuredContent"]["bioactivation_alerts"]
@@ -1057,6 +1179,15 @@ mod tests {
                 .unwrap_or(0)
                 >= 1
         );
+        assert_eq!(lines[3]["result"]["isError"], false);
+        assert!(
+            lines[3]["result"]["structuredContent"]["qd"]["daily_dose_mg"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(base.join("ibu_pk.svg").exists());
+        assert_eq!(lines[4]["result"]["isError"], true);
 
         let _ = std::fs::remove_dir_all(&base);
         Ok(())

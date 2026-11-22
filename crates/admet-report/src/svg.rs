@@ -4,7 +4,9 @@ use admet_calc::pharmacokinetics::{
     BOILED_EGG_WHITE_ANGLE_RAD, BOILED_EGG_WHITE_AXES, BOILED_EGG_WHITE_CENTER,
     BOILED_EGG_YOLK_ANGLE_RAD, BOILED_EGG_YOLK_AXES, BOILED_EGG_YOLK_CENTER,
 };
-use admet_calc::{BioavailabilityRadar, BoiledEggGeometry, MoleculeEvaluation};
+use admet_calc::{
+    BioavailabilityRadar, BoiledEggGeometry, MoleculeEvaluation, PbpkHumanDoseReport,
+};
 
 /// Render a 6-axis Bioavailability Radar chart as standalone SVG using shared radar geometry.
 pub fn render_radar_svg(eval: &MoleculeEvaluation) -> String {
@@ -232,6 +234,202 @@ pub fn render_boiled_egg_svg(evals: &[MoleculeEvaluation]) -> String {
         lx + 16.0,
         lx + 28.0,
         lx + 10.0
+    );
+
+    let _ = writeln!(out, "</svg>");
+    out
+}
+
+/// Renders a standalone vector SVG of the steady-state 48 h unbound plasma concentration–time
+/// profile (`C_u(t)`) with 90% conformal uncertainty ribbon, `IC50`/`IC90` target lines, and
+/// human dosing summary box.
+#[must_use]
+pub fn render_pk_profile_svg(report: &PbpkHumanDoseReport) -> String {
+    let w = 680.0_f64;
+    let h = 360.0_f64;
+    let pad_l = 66.0_f64;
+    let pad_r = 180.0_f64;
+    let pad_t = 44.0_f64;
+    let pad_b = 50.0_f64;
+    let plot_w = w - pad_l - pad_r;
+    let plot_h = h - pad_t - pad_b;
+
+    let max_t = report
+        .steady_state_curve
+        .last()
+        .map_or(48.0, |p| p.time_h.max(24.0));
+    let ic50 = report.target_potency_nm.max(0.1);
+    let ic90 = ic50 * 9.0;
+    let max_curve = report
+        .steady_state_curve
+        .iter()
+        .map(|p| p.cu_p95_nm.max(p.cu_median_nm))
+        .fold(ic50 * 2.0, f64::max);
+    let y_max = (max_curve.max(ic50 * 2.5) * 1.15).max(1.0);
+
+    let map_x = |t: f64| pad_l + (t / max_t).clamp(0.0, 1.0) * plot_w;
+    let map_y = |c: f64| pad_t + plot_h - (c / y_max).clamp(0.0, 1.0) * plot_h;
+
+    let safe_title = escape_xml(&truncate_label(&report.molecule_name, 38));
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">\n\
+         <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n\
+         <text x=\"{pad_l}\" y=\"24\" font-family=\"Helvetica,sans-serif\" font-size=\"13\" font-weight=\"700\" fill=\"#111827\">Human Steady-State Unbound Plasma PK: {safe_title}</text>\n\
+         <rect x=\"{pad_l}\" y=\"{pad_t}\" width=\"{plot_w}\" height=\"{plot_h}\" fill=\"#f8fafc\" stroke=\"#94a3b8\" stroke-width=\"1\"/>\n"
+    );
+
+    // Horizontal grid lines & Y axis labels
+    for i in 0..=4 {
+        let frac = (i as f64) / 4.0;
+        let val = y_max * frac;
+        let yy = map_y(val);
+        let _ = writeln!(
+            out,
+            "<line x1=\"{pad_l:.1}\" y1=\"{yy:.1}\" x2=\"{:.1}\" y2=\"{yy:.1}\" stroke=\"#e2e8f0\" stroke-width=\"0.8\"/>\n\
+             <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" text-anchor=\"end\" fill=\"#475569\">{val:.0}</text>",
+            pad_l + plot_w,
+            pad_l - 6.0,
+            yy + 3.5
+        );
+    }
+
+    // Vertical grid lines (every 12 h)
+    let mut t_tick = 0.0;
+    while t_tick <= max_t + 0.1 {
+        let xx = map_x(t_tick);
+        let _ = writeln!(
+            out,
+            "<line x1=\"{xx:.1}\" y1=\"{pad_t:.1}\" x2=\"{xx:.1}\" y2=\"{:.1}\" stroke=\"#e2e8f0\" stroke-width=\"0.8\"/>\n\
+             <text x=\"{xx:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" text-anchor=\"middle\" fill=\"#475569\">{t_tick:.0}h</text>",
+            pad_t + plot_h,
+            pad_t + plot_h + 16.0
+        );
+        t_tick += 12.0;
+    }
+
+    // 90% conformal uncertainty ribbon (p5..p95)
+    if report.steady_state_curve.len() >= 2 {
+        let mut poly_pts: Vec<(f64, f64)> = report
+            .steady_state_curve
+            .iter()
+            .map(|p| (map_x(p.time_h), map_y(p.cu_p95_nm)))
+            .collect();
+        for p in report.steady_state_curve.iter().rev() {
+            poly_pts.push((map_x(p.time_h), map_y(p.cu_p5_nm)));
+        }
+        let _ = writeln!(
+            out,
+            "<polygon points=\"{}\" fill=\"rgba(37, 99, 235, 0.16)\" stroke=\"none\"/>",
+            fmt_pts(&poly_pts)
+        );
+        let med_pts: Vec<(f64, f64)> = report
+            .steady_state_curve
+            .iter()
+            .map(|p| (map_x(p.time_h), map_y(p.cu_median_nm)))
+            .collect();
+        let _ = writeln!(
+            out,
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"#1d4ed8\" stroke-width=\"2.2\"/>",
+            fmt_pts(&med_pts)
+        );
+    }
+
+    // IC50 & IC90 target reference lines
+    let y_ic50 = map_y(ic50);
+    let _ = writeln!(
+        out,
+        "<line x1=\"{pad_l:.1}\" y1=\"{y_ic50:.1}\" x2=\"{:.1}\" y2=\"{y_ic50:.1}\" stroke=\"#16a34a\" stroke-width=\"1.4\" stroke-dasharray=\"5,4\"/>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9\" font-weight=\"700\" fill=\"#15803d\">IC50 ({ic50:.1} nM)</text>",
+        pad_l + plot_w,
+        pad_l + 6.0,
+        (y_ic50 - 4.0).max(pad_t + 10.0)
+    );
+    if ic90 <= y_max * 0.98 {
+        let y_ic90 = map_y(ic90);
+        let _ = writeln!(
+            out,
+            "<line x1=\"{pad_l:.1}\" y1=\"{y_ic90:.1}\" x2=\"{:.1}\" y2=\"{y_ic90:.1}\" stroke=\"#ea580c\" stroke-width=\"1.2\" stroke-dasharray=\"3,3\"/>\n\
+             <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9\" font-weight=\"700\" fill=\"#c2410c\">IC90 ({ic90:.0} nM)</text>",
+            pad_l + plot_w,
+            pad_l + 6.0,
+            (y_ic90 - 4.0).max(pad_t + 10.0)
+        );
+    }
+
+    // Axis titles
+    let _ = writeln!(
+        out,
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"10.5\" font-weight=\"700\" text-anchor=\"middle\" fill=\"#1e293b\">Steady-State Time (hours)</text>\n\
+         <text x=\"18\" y=\"{:.1}\" transform=\"rotate(-90 18 {:.1})\" font-family=\"Helvetica,sans-serif\" font-size=\"10.5\" font-weight=\"700\" text-anchor=\"middle\" fill=\"#1e293b\">Unbound Plasma C_u (nM)</text>",
+        pad_l + plot_w * 0.5,
+        h - 12.0,
+        pad_t + plot_h * 0.5,
+        pad_t + plot_h * 0.5
+    );
+
+    // Right-hand summary card
+    let sx = pad_l + plot_w + 14.0;
+    let safe_bcs = escape_xml(report.bcs_class.short_label());
+    let _ = writeln!(
+        out,
+        "<rect x=\"{sx:.1}\" y=\"{pad_t:.1}\" width=\"156\" height=\"240\" rx=\"6\" fill=\"#f8fafc\" stroke=\"#cbd5e1\"/>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"10.5\" font-weight=\"700\" fill=\"#0f172a\">Human PK Summary</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" fill=\"#334155\">Route: {} | {safe_bcs}</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" fill=\"#334155\">F_oral: {:.1}% | f_u,p: {:.3}</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" fill=\"#334155\">CL_tot: {:.2} mL/min/kg</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" fill=\"#334155\">V_d,ss: {:.2} L/kg</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" fill=\"#334155\">t1/2: {:.1} h</text>\n\
+         <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#cbd5e1\"/>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" font-weight=\"700\" fill=\"#1d4ed8\">QD: {:.1} mg/d</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"8.5\" fill=\"#475569\">90% CI: {:.0}-{:.0} mg</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9.5\" font-weight=\"700\" fill=\"#0f766e\">BID: {:.1} mg q12h</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"8.5\" fill=\"#475569\">90% CI: {:.0}-{:.0} mg/d</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"9\" fill=\"#334155\">hERG Margin: {:.0}x</text>\n\
+         <rect x=\"{:.1}\" y=\"{:.1}\" width=\"12\" height=\"8\" fill=\"rgba(37, 99, 235, 0.25)\"/>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Helvetica,sans-serif\" font-size=\"8.5\" fill=\"#475569\">90% Conformal Band</text>",
+        sx + 10.0,
+        pad_t + 20.0,
+        sx + 10.0,
+        pad_t + 40.0,
+        report.route.as_str(),
+        sx + 10.0,
+        pad_t + 58.0,
+        report.oral_bioavailability_f * 100.0,
+        report.fup,
+        sx + 10.0,
+        pad_t + 76.0,
+        report.cl_total_ml_min_kg,
+        sx + 10.0,
+        pad_t + 94.0,
+        report.vdss_l_kg,
+        sx + 10.0,
+        pad_t + 112.0,
+        report.t_half_ivive_h,
+        sx + 8.0,
+        pad_t + 124.0,
+        sx + 148.0,
+        pad_t + 124.0,
+        sx + 10.0,
+        pad_t + 142.0,
+        report.qd.daily_dose_mg,
+        sx + 10.0,
+        pad_t + 156.0,
+        report.qd.daily_dose_ci90_mg[0],
+        report.qd.daily_dose_ci90_mg[1],
+        sx + 10.0,
+        pad_t + 176.0,
+        report.bid.dose_mg_per_admin,
+        sx + 10.0,
+        pad_t + 190.0,
+        report.bid.daily_dose_ci90_mg[0],
+        report.bid.daily_dose_ci90_mg[1],
+        sx + 10.0,
+        pad_t + 210.0,
+        report.qd.herg_safety_margin,
+        sx + 10.0,
+        pad_t + 222.0,
+        sx + 26.0,
+        pad_t + 230.0
     );
 
     let _ = writeln!(out, "</svg>");

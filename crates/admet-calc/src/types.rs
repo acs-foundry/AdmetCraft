@@ -638,6 +638,155 @@ pub struct MetaboliteGuardReport {
     pub metabolites: Vec<PredictedMetabolite>,
 }
 
+/// Dosing route supported by the mechanistic minimal-PBPK simulator (Oral, IV, SC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PkRoute {
+    #[default]
+    Oral,
+    Iv,
+    Sc,
+}
+
+impl PkRoute {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Oral => "Oral",
+            Self::Iv => "IV",
+            Self::Sc => "SC",
+        }
+    }
+}
+
+/// Biopharmaceutics Classification System (BCS) solubility/permeability class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BcsClass {
+    #[default]
+    ClassI,
+    ClassII,
+    ClassIII,
+    ClassIV,
+}
+
+impl BcsClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClassI => "BCS Class I (High Sol / High Perm)",
+            Self::ClassII => "BCS Class II (Low Sol / High Perm)",
+            Self::ClassIII => "BCS Class III (High Sol / Low Perm)",
+            Self::ClassIV => "BCS Class IV (Low Sol / Low Perm)",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::ClassI => "BCS I",
+            Self::ClassII => "BCS II",
+            Self::ClassIII => "BCS III",
+            Self::ClassIV => "BCS IV",
+        }
+    }
+}
+
+/// Configuration for IVIVE -> Minimal-PBPK human therapeutic dose simulation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PkSimulationConfig {
+    /// Target biochemical/cellular potency (`IC50` or `Ki`) in nanomolar (nM).
+    pub target_potency_nm: f64,
+    /// Required unbound concentration multiple of `target_potency_nm` (default `1.0`).
+    pub target_fold: f64,
+    /// When `true`, matches unbound trough `Cmin,u >= target_fold * IC50`; when `false`, matches `Cavg,u`.
+    pub match_trough: bool,
+    pub route: PkRoute,
+    pub body_weight_kg: f64,
+    /// Optional Michaelis-Menten TMDD maximum saturable clearance (`nM/h`) for future peptide/biologic hooks.
+    #[serde(default)]
+    pub tmdd_vmax_nm_h: Option<f64>,
+    /// Optional Michaelis-Menten TMDD affinity constant (`nM`).
+    #[serde(default)]
+    pub tmdd_km_nm: Option<f64>,
+}
+
+impl Default for PkSimulationConfig {
+    fn default() -> Self {
+        Self {
+            target_potency_nm: 10.0,
+            target_fold: 1.0,
+            match_trough: true,
+            route: PkRoute::Oral,
+            body_weight_kg: 70.0,
+            tmdd_vmax_nm_h: None,
+            tmdd_km_nm: None,
+        }
+    }
+}
+
+/// Single timepoint along the steady-state unbound plasma concentration-time profile.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PkTimePoint {
+    pub time_h: f64,
+    pub cu_median_nm: f64,
+    pub cu_p5_nm: f64,
+    pub cu_p95_nm: f64,
+}
+
+/// Predicted human therapeutic dose and steady-state PK metrics for one dosing regimen (QD or BID).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegimenDoseEstimate {
+    pub regimen_label: String,
+    pub tau_h: f64,
+    pub dose_mg_per_admin: f64,
+    pub daily_dose_mg: f64,
+    pub daily_dose_ci90_mg: [f64; 2],
+    pub cmax_u_nm: f64,
+    pub cmin_u_nm: f64,
+    pub cavg_u_nm: f64,
+    pub auc_0_24_u_nm_h: f64,
+    pub tmax_h: f64,
+    pub accumulation_ratio: f64,
+    pub cbrain_avg_u_nm: f64,
+    pub dose_number_do: f64,
+    pub solubility_limited: bool,
+    pub herg_safety_margin: f64,
+    pub feasibility: String,
+}
+
+/// Complete mechanistic IVIVE -> Minimal-PBPK human PK and therapeutic dose prediction dossier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PbpkHumanDoseReport {
+    pub molecule_name: String,
+    pub canonical_smiles: String,
+    pub molecular_weight: f64,
+    pub route: PkRoute,
+    pub bcs_class: BcsClass,
+    pub fup: f64,
+    pub fu_inc: f64,
+    pub blood_to_plasma_rb: f64,
+    pub cl_int_u_ul_min_mg: f64,
+    pub cl_hepatic_ml_min_kg: f64,
+    pub cl_renal_ml_min_kg: f64,
+    pub cl_total_ml_min_kg: f64,
+    pub hepatic_extraction_eh: f64,
+    pub vdss_l_kg: f64,
+    pub t_half_ivive_h: f64,
+    pub t_half_obach_h: Option<f64>,
+    pub t_half_consensus_h: f64,
+    pub peff_1e4_cm_s: f64,
+    pub fa: f64,
+    pub fg: f64,
+    pub fh: f64,
+    pub oral_bioavailability_f: f64,
+    pub ka_per_h: f64,
+    pub kpuu_brain: f64,
+    pub target_potency_nm: f64,
+    pub target_fold: f64,
+    pub match_trough: bool,
+    pub qd: RegimenDoseEstimate,
+    pub bid: RegimenDoseEstimate,
+    pub recommended_regimen: String,
+    pub steady_state_curve: Vec<PkTimePoint>,
+    pub warnings: Vec<String>,
+}
+
 /// Complete ADMET evaluation for one molecule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MoleculeEvaluation {

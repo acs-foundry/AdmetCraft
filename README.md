@@ -1,11 +1,12 @@
-# AdmetCraft v1.1.0
+# AdmetCraft v1.2.0
 
-**Local-First, Pure-Rust Quantitative ADMET, QSAR + Tox21 (32 TDC Endpoints + 90% Conformal CI + Applicability Domain), SEA Off-Target Fishing, Phase I/II Metabolite Guard & TPP MPO Workbench** (`#![forbid(unsafe_code)]`).
+**Local-First, Pure-Rust Quantitative ADMET, QSAR + Tox21 (32 TDC Endpoints + 90% Conformal CI + Applicability Domain), SEA Off-Target Fishing, Phase I/II Metabolite Guard, Mechanistic IVIVE → Minimal-PBPK Human Therapeutic Dose Simulator & TPP MPO Workbench** (`#![forbid(unsafe_code)]`).
 
-**AdmetCraft v1.1** combines exact physicochemical, ionization ($\text{p}K_a$/$\log D_{7.4}$), solubility, druglikeness (**QED**, **Pfizer CNS MPO**, **Lipinski/Ghose/Veber/Egan/Muegge**, **Pfizer 3/75**, **GSK 4/400**, **Golden Triangle**, **Ro3**, **bRo5**), and structural alerts (**PAINS** / **Brenk**) with:
+**AdmetCraft v1.2** combines exact physicochemical, ionization ($\text{p}K_a$/$\log D_{7.4}$), solubility, druglikeness (**QED**, **Pfizer CNS MPO**, **Lipinski/Ghose/Veber/Egan/Muegge**, **Pfizer 3/75**, **GSK 4/400**, **Golden Triangle**, **Ro3**, **bRo5**), and structural alerts (**PAINS** / **Brenk**) with:
 - **32 pure-Rust trained TDC QSAR GBDT models** (20 core ADMET + **12 Tox21 Nuclear Receptor & Cellular Stress pathways**, mean held-out Bemis-Murcko scaffold **ROC AUC = 0.833**, mean 90% conformal coverage **92.7%**),
 - **Local SEA (*Similarity Ensemble Approach*) Off-Target Fishing** against the curated **Bowes Safety-20** human anti-target panel (`< 2 ms`/compound, hardware POPCNT ECFP4 Tanimoto + Gumbel E-values, extensible via `build-sea-index`),
 - **Phase I/II Metabolite Guard** (11 deterministic graph biotransformations: benzylic/allylic/aromatic hydroxylation, O-/N-dealkylation, furan/thiophene/alkene epoxidation, aniline N-hydroxylation, thioether S-oxidation, ester hydrolysis, phenolic O-glucuronidation/sulfation, acyl-glucuronidation, and NAPQI-type quinone-imine oxidation — automatically re-screened for reactive bioactivation & DILI/AMES/hERG toxicity escalation),
+- **Mechanistic IVIVE → Minimal-PBPK Human Therapeutic Dose Simulator (`pk-dose`)**: scales calibrated QSAR `f_u,p`, `CLint`, `VDss`, `Caco-2`, `HIA`, and FaSSIF pH 6.5 solubility (Henderson-Hasselbalch ionization + bile-salt micelles + Butler-Dressman DCS dynamic sink) through Austin (2002) `fu_inc`, the well-stirred liver model, and a mass-conserving 4th-order Runge-Kutta (`RK4`) multi-compartment ODE engine (`Oral | IV | SC` + optional saturable TMDD clearance hook for peptides/biologics), propagating 90% Split Conformal QSAR intervals via 200-draw deterministic Monte Carlo into QD/BID human dose brackets, hERG margins, BCS Class I–IV, and standalone SVG `C_u(t)` profiles,
 - **Atomic Sites of Metabolism (SoM)** and configurable **Target Product Profile (`TPP MPO`)** scoring—completely offline across all CPU cores.
 
 ---
@@ -13,12 +14,12 @@
 ## Architecture (7-Crate Portable Workspace)
 
 - `crates/chem-core` (L0): SMILES & V2000 MOL/SDF parsers, RFC-4180 CSV importer, molecular graph, GF(2) SSSR ring perception, Hückel $4n+2$ aromaticity perception, stack-safe canonical SMILES, automatic desalting, stereochemistry warnings, 2D coordinate layout, and recursive SMARTS matcher.
-- `crates/admet-calc` (L1): Parallel (`rayon`) descriptor, ionization ($\text{p}K_a$/$\log D_{7.4}$), lipophilicity, solubility, BOILED-Egg, QED/CNS MPO, industrial rules, PAINS/Brenk/hERG/AMES/DILI, matched-pair comparison (`compare_smiles`), and shared QSAR/SoM/TPP data types.
-- `crates/admet-qsar` (L1.5): **100% pure-Rust Rayon-parallel histogram GBDT trainer & inference engine** (`#![forbid(unsafe_code)]`), circular **ECFP4 / Morgan radius-2** (`1024`-bit POPCNT Tanimoto + counts) + 56 dense descriptors, deterministic **Bemis-Murcko scaffold splitter (70/10/20)**, Platt calibration, **Split Conformal Prediction (90% CI & Mondrian sets)**, **Applicability Domain** (`InDomain / Borderline / OutOfDomain`), **atomic Sites of Metabolism (SoM)** with MedChem blocking fixes, **TPP MPO** (`Oral`, `CNS`, `Peripheral`, `Oncology`), and `CRAFT_DATA_DIR` model-pack loader (`/home/acs/Datos/CraftBio/models/admetcraft_v1/admetcraft_tdc_v1.json`).
-- `crates/admet-report` (L2): CSV (90+ columns incl. QSAR/AD/TPP/SoM), JSON, SVG (Radar & BOILED-Egg), and pure-Rust multi-page PDF 1.4 vector report writer with **zlib `/Filter /FlateDecode`** compression.
+- `crates/admet-calc` (L1): Parallel (`rayon`) descriptor, ionization ($\text{p}K_a$/$\log D_{7.4}$), lipophilicity, solubility, BOILED-Egg, QED/CNS MPO, industrial rules, PAINS/Brenk/hERG/AMES/DILI, matched-pair comparison (`compare_smiles`), and shared QSAR/SoM/TPP/PBPK data types.
+- `crates/admet-qsar` (L1.5): **100% pure-Rust Rayon-parallel histogram GBDT trainer & inference engine** (`#![forbid(unsafe_code)]`), circular **ECFP4 / Morgan radius-2** (`1024`-bit POPCNT Tanimoto + counts) + 56 dense descriptors, deterministic **Bemis-Murcko scaffold splitter (70/10/20)**, Platt calibration, **Split Conformal Prediction (90% CI & Mondrian sets)**, **Applicability Domain** (`InDomain / Borderline / OutOfDomain`), **SEA Off-Target Fishing**, **Phase I/II Metabolite Guard**, **Mechanistic IVIVE → Minimal-PBPK (`pbpk.rs`)**, **atomic Sites of Metabolism (SoM)** with MedChem blocking fixes, **TPP MPO** (`Oral`, `CNS`, `Peripheral`, `Oncology`), and `CRAFT_DATA_DIR` model-pack loader (`/home/acs/Datos/CraftBio/models/admetcraft_v1/admetcraft_tdc_v1.json`).
+- `crates/admet-report` (L2): CSV (95+ columns incl. QSAR/AD/TPP/SoM/Tox21/SEA/Metabolites), JSON, SVG (Radar, BOILED-Egg, and 48 h steady-state PK `C_u(t)` profile with 90% CI ribbon), and pure-Rust multi-page PDF 1.4 vector report writer with **zlib `/Filter /FlateDecode`** compression.
 - `crates/admet-engine` (L3): Session state (with live TPP preset switching), undo/redo history, unified `CommandRegistry`, multi-criteria filtering, and `PathSandbox` (`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`).
-- `apps/admetcraft-cli` (L4): Headless CLI (`eval`, `profile`, `compare`, `batch`, `train-qsar`, `model-info`) and strict **JSON-RPC 2.0 / MCP (2025-06-18)** server (`stdio` and authenticated loopback-default `--tcp`) with `outputSchema` on all 6 tools (incl. `model_info`).
-- `apps/admetcraft` (L5): Native `egui`/`eframe` desktop GUI with 2D molecular sketcher, **QSAR (TDC + 90% CI + SoM + TPP)** tab, live **2D Sites of Metabolism hotspot overlay**, **TPP Preset selector**, KPI badge strip (`QED`, `CNS MPO`, `LogD7.4`, `hERG`, `TPP MPO`, `AD`), interactive *BOILED-Egg* plot, Batch Summary Table, Light/Dark themes, and `Ctrl+K` Command Palette.
+- `apps/admetcraft-cli` (L4): Headless CLI (`eval`, `profile`, `compare`, `batch`, `metabolites`, `offtargets`, `build-sea-index`, `pk-dose`, `train-qsar`, `model-info`) and strict **JSON-RPC 2.0 / MCP (2025-06-18)** server (`stdio` and authenticated loopback-default `--tcp`) with `outputSchema` on all 9 tools (incl. `predict_metabolites`, `predict_offtargets`, and `predict_human_pk_dose`).
+- `apps/admetcraft` (L5): Native `egui`/`eframe` desktop GUI with 2D molecular sketcher, **QSAR (TDC + 90% CI + SoM + TPP)** tab, **Human PK / Minimal-PBPK Dose Simulator** panel with live `C_u(t)` sparkline, live **2D Sites of Metabolism hotspot overlay**, **TPP Preset selector**, KPI badge strip (`QED`, `CNS MPO`, `LogD7.4`, `hERG`, `TPP MPO`, `AD`), interactive *BOILED-Egg* plot, Batch Summary Table, Light/Dark themes, and `Ctrl+K` Command Palette.
 
 ---
 
@@ -87,7 +88,10 @@ admetcraft-cli profile "COc1ccc(CCN(C)CCCC(C#N)(c2ccc(OC)c(OC)c2)C(C)C)cc1OC" --
 # Parallel batch triage (.smi, .csv, .sdf -> .csv, .json, .pdf, .svg)
 admetcraft-cli batch candidates.smi --tpp oncology --out admet_report.csv
 
-# Sandboxed MCP server over stdio (6 tools with outputSchema)
+# Human PK / Minimal-PBPK therapeutic dose simulation (QD/BID + 90% CI + SVG curve)
+admetcraft-cli pk-dose "COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1" --name Gefitinib --potency-nm 30 --tpp oncology --out-svg gefitinib_pk.svg
+
+# Sandboxed MCP server over stdio (9 tools with outputSchema)
 admetcraft-cli mcp --read-root ./inputs --write-root ./outputs
 ```
 

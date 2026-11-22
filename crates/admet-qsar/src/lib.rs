@@ -10,6 +10,7 @@ pub mod gbdt;
 pub mod metabolites;
 pub mod offtarget;
 pub mod pack;
+pub mod pbpk;
 pub mod som;
 pub mod tpp;
 
@@ -41,6 +42,7 @@ pub use pack::{
     AdmetModelPack, QsarError, TDC_ENDPOINTS, TdcEndpointSpec, load_default_model_pack,
     parse_tdc_tab, scaffold_split_indices, summarize_tox21, train_tdc_model_pack,
 };
+pub use pbpk::{dg_kcal_to_ki_nm, render_pk_dose_markdown, simulate_human_pk_dose};
 pub use som::predict_metabolism_sites;
 pub use tpp::compute_tpp_mpo;
 

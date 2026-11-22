@@ -15,7 +15,7 @@ use thiserror::Error;
 
 pub use csv_json::{export_csv_string, export_json_string};
 pub use pdf::export_pdf_bytes;
-pub use svg::{render_boiled_egg_svg, render_radar_svg};
+pub use svg::{render_boiled_egg_svg, render_pk_profile_svg, render_radar_svg};
 
 /// Errors produced by `admet-report`.
 #[derive(Debug, Error)]
@@ -197,6 +197,76 @@ mod tests {
         );
         assert!(!svg.contains('\u{FFFE}') && !svg.contains('\u{FFFF}'));
         assert!(svg.contains("&lt;script&gt;&amp;&quot;"));
+
+        let dummy_reg = admet_calc::RegimenDoseEstimate {
+            regimen_label: "QD (q24h)".to_string(),
+            tau_h: 24.0,
+            dose_mg_per_admin: 120.0,
+            daily_dose_mg: 120.0,
+            daily_dose_ci90_mg: [60.0, 240.0],
+            cmax_u_nm: 45.0,
+            cmin_u_nm: 12.0,
+            cavg_u_nm: 25.0,
+            auc_0_24_u_nm_h: 600.0,
+            tmax_h: 2.0,
+            accumulation_ratio: 1.4,
+            cbrain_avg_u_nm: 5.0,
+            dose_number_do: 0.4,
+            solubility_limited: false,
+            herg_safety_margin: 150.0,
+            feasibility: "Feasible".to_string(),
+        };
+        let pk_rep = admet_calc::PbpkHumanDoseReport {
+            molecule_name: "<script>Lead</script>".to_string(),
+            canonical_smiles: "CCO".to_string(),
+            molecular_weight: 350.0,
+            route: admet_calc::PkRoute::Oral,
+            bcs_class: admet_calc::BcsClass::ClassI,
+            fup: 0.1,
+            fu_inc: 0.6,
+            blood_to_plasma_rb: 0.85,
+            cl_int_u_ul_min_mg: 25.0,
+            cl_hepatic_ml_min_kg: 3.5,
+            cl_renal_ml_min_kg: 0.1,
+            cl_total_ml_min_kg: 3.6,
+            hepatic_extraction_eh: 0.18,
+            vdss_l_kg: 2.0,
+            t_half_ivive_h: 6.4,
+            t_half_obach_h: Some(7.0),
+            t_half_consensus_h: 6.7,
+            peff_1e4_cm_s: 3.0,
+            fa: 0.92,
+            fg: 0.85,
+            fh: 0.82,
+            oral_bioavailability_f: 0.64,
+            ka_per_h: 1.2,
+            kpuu_brain: 0.2,
+            target_potency_nm: 10.0,
+            target_fold: 1.0,
+            match_trough: true,
+            qd: dummy_reg.clone(),
+            bid: dummy_reg,
+            recommended_regimen: "120 mg QD".to_string(),
+            steady_state_curve: vec![
+                admet_calc::PkTimePoint {
+                    time_h: 0.0,
+                    cu_median_nm: 12.0,
+                    cu_p5_nm: 6.0,
+                    cu_p95_nm: 24.0,
+                },
+                admet_calc::PkTimePoint {
+                    time_h: 24.0,
+                    cu_median_nm: 45.0,
+                    cu_p5_nm: 22.0,
+                    cu_p95_nm: 80.0,
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        let pk_svg = render_pk_profile_svg(&pk_rep);
+        assert!(
+            pk_svg.contains("<svg") && pk_svg.contains("IC50") && pk_svg.contains("&lt;script&gt;")
+        );
         Ok(())
     }
 }

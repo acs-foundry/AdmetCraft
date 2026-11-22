@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use admet_calc::{MoleculeEvaluation, TppPreset};
+use admet_calc::{MoleculeEvaluation, PkRoute, PkSimulationConfig, TppPreset};
 use admet_engine::{FilterCriteria, MAX_READ_BYTES, PathSandbox};
 use admet_qsar::{
-    DEFAULT_MAX_METABOLITES, compare_smiles_auto, evaluate_batch_auto, evaluate_smiles_auto,
-    extract_mol_features, load_default_model_pack, load_default_sea_index,
-    predict_metabolism_sites, run_metabolite_guard,
+    DEFAULT_MAX_METABOLITES, compare_smiles_auto, dg_kcal_to_ki_nm, evaluate_batch_auto,
+    evaluate_smiles_auto, extract_mol_features, load_default_model_pack, load_default_sea_index,
+    predict_metabolism_sites, run_metabolite_guard, simulate_human_pk_dose,
 };
-use admet_report::{ExportFormat, write_report_to_writer};
+use admet_report::{ExportFormat, render_pk_profile_svg, write_report_to_writer};
 use chem_core::{parse_csv_batch, parse_sdf, parse_smiles, parse_smiles_batch};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -725,6 +725,36 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["panel_version", "targets_evaluated", "high_risk_count", "hits"]
             }
+        },
+        {
+            "name": "predict_human_pk_dose",
+            "description": "Simulate mechanistic IVIVE -> Minimal-PBPK human pharmacokinetics and predicted QD/BID therapeutic oral/IV/SC doses with 90% conformal uncertainty intervals and optional SVG curve export inside --write-root.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "smiles": { "type": "string" },
+                    "name": { "type": "string" },
+                    "potency_nm": { "type": "number" },
+                    "dg_kcal": { "type": "number" },
+                    "target_fold": { "type": "number" },
+                    "match_trough": { "type": "boolean" },
+                    "route": { "type": "string", "enum": ["oral", "iv", "sc"] },
+                    "out_svg_path": { "type": "string" }
+                },
+                "required": ["smiles"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "bcs_class": { "type": "string" },
+                    "oral_bioavailability_f": { "type": "number" },
+                    "t_half_ivive_h": { "type": "number" },
+                    "qd": { "type": "object" },
+                    "bid": { "type": "object" },
+                    "recommended_regimen": { "type": "string" }
+                },
+                "required": ["bcs_class", "oral_bioavailability_f", "qd", "bid", "recommended_regimen"]
+            }
         }
     ])
 }
@@ -758,6 +788,7 @@ fn call_tool(name: &str, args: &Value, sandbox: &PathSandbox) -> Result<Value, S
         "model_info" => tool_model_info(),
         "predict_metabolites" => tool_predict_metabolites(args),
         "predict_offtargets" => tool_predict_offtargets(args),
+        "predict_human_pk_dose" => tool_predict_human_pk_dose(args, sandbox),
         other => Err(format!("invalid params: unknown tool '{other}'")),
     }
 }
@@ -1293,6 +1324,73 @@ fn tool_predict_offtargets(args: &Value) -> Result<Value, String> {
         report.high_risk_count,
         report.moderate_risk_count,
         report.targets_evaluated
+    );
+    let payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+    Ok(tool_ok(summary, payload))
+}
+
+fn tool_predict_human_pk_dose(args: &Value, sandbox: &PathSandbox) -> Result<Value, String> {
+    let Some(smi) = args
+        .get("smiles")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err("invalid params: missing required non-empty string 'smiles'".to_string());
+    };
+    let name = parse_optional_string(args, "name")?;
+    let potency_nm = args
+        .get("dg_kcal")
+        .and_then(Value::as_f64)
+        .map(dg_kcal_to_ki_nm)
+        .unwrap_or_else(|| {
+            args.get("potency_nm")
+                .and_then(Value::as_f64)
+                .unwrap_or(10.0)
+                .max(0.01)
+        });
+    let target_fold = args
+        .get("target_fold")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0)
+        .clamp(0.1, 100.0);
+    let match_trough = args
+        .get("match_trough")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let route = match args.get("route").and_then(Value::as_str) {
+        Some("iv") => PkRoute::Iv,
+        Some("sc") => PkRoute::Sc,
+        _ => PkRoute::Oral,
+    };
+    let eval = match evaluate_smiles_auto(smi, name, parse_tpp_preset(args)) {
+        Ok(e) => e,
+        Err(e) => return Ok(tool_err(format!("invalid SMILES: {e}"))),
+    };
+    let cfg = PkSimulationConfig {
+        target_potency_nm: potency_nm,
+        target_fold,
+        match_trough,
+        route,
+        ..Default::default()
+    };
+    let report = simulate_human_pk_dose(&eval, &cfg);
+    if let Some(svg_out) = parse_optional_string(args, "out_svg_path")? {
+        let (_, mut file) = match sandbox.open_write(Path::new(svg_out)) {
+            Ok(pair) => pair,
+            Err(e) => return Ok(tool_err(format!("write sandbox error: {e}"))),
+        };
+        if let Err(e) = file.write_all(render_pk_profile_svg(&report).as_bytes()) {
+            return Ok(tool_err(format!("svg write error: {e}")));
+        }
+    }
+    let summary = format!(
+        "Human PK/PBPK for {}: {} | F={:.1}% | t1/2={:.1}h | {}",
+        report.molecule_name,
+        report.recommended_regimen,
+        report.oral_bioavailability_f * 100.0,
+        report.t_half_ivive_h,
+        report.bcs_class.short_label()
     );
     let payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
     Ok(tool_ok(summary, payload))
