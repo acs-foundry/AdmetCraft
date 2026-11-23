@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/chem-core",
     "crates/admet-calc",
@@ -8,10 +8,11 @@ members = [
     "crates/admet-engine",
     "apps/admetcraft-cli",
     "apps/admetcraft",
+    "xtask",
 ]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
@@ -34,6 +35,8 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 eframe = "0.31"
 egui = "0.31"
+craftbio-scene = { git = "https://github.com/acs-foundry/craftbio-libs", tag = "v1.1.0" }
+craftbio-report = { git = "https://github.com/acs-foundry/craftbio-libs", tag = "v1.1.0" }
 
 [profile.release]
 overflow-checks = true

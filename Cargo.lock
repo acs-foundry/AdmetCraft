@@ -118,7 +118,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "admet-calc"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "chem-core",
  "rayon",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "admet-engine"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "admet-calc",
  "admet-qsar",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "admet-qsar"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "admet-calc",
  "chem-core",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "admet-report"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "admet-calc",
  "chem-core",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "admetcraft"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "admet-calc",
  "admet-engine",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "admetcraft-cli"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "admet-calc",
  "admet-engine",
@@ -190,6 +190,8 @@ dependencies = [
  "admet-report",
  "chem-core",
  "clap",
+ "craftbio-report",
+ "craftbio-scene",
  "serde",
  "serde_json",
 ]
@@ -733,11 +735,20 @@ dependencies = [
 
 [[package]]
 name = "chem-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "csv",
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -874,6 +885,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-ipc"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=52d2560c183b2df8b1ffc25ca2078683af146fd6#52d2560c183b2df8b1ffc25ca2078683af146fd6"
+dependencies = [
+ "chrono",
+ "getrandom 0.2.17",
+ "interprocess",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "widestring",
+]
+
+[[package]]
+name = "craftbio-report"
+version = "1.1.0"
+source = "git+https://github.com/acs-foundry/craftbio-libs?tag=v1.1.0#5ac81242b15578d934c59235ef085f54f73ea1e4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "craftbio-scene"
+version = "1.1.0"
+source = "git+https://github.com/acs-foundry/craftbio-libs?tag=v1.1.0#5ac81242b15578d934c59235ef085f54f73ea1e4"
+dependencies = [
+ "craft-ipc",
+ "crc32fast",
+ "flate2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -995,6 +1043,12 @@ checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
 ]
+
+[[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "document-features"
@@ -1756,6 +1810,19 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2720,6 +2787,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2910,6 +2983,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -3773,6 +3857,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4109,6 +4199,10 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
+
+[[package]]
+name = "xtask"
+version = "1.3.0"
 
 [[package]]
 name = "yoke"

@@ -14,5 +14,7 @@ admet-qsar = { path = "../../crates/admet-qsar" }
 admet-report = { path = "../../crates/admet-report" }
 admet-engine = { path = "../../crates/admet-engine" }
 clap.workspace = true
+craftbio-report.workspace = true
+craftbio-scene.workspace = true
 serde.workspace = true
 serde_json.workspace = true

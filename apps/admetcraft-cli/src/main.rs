@@ -237,6 +237,35 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Export a complete ADMET + Human PK/PBPK ArtCraft Office Suite bundle (PK curve PNG + WordCraft .docx + DeckCraft .pptx + GridCraft .xlsx) and optionally live-push over Craft Link v1.
+    ExportArtcraft {
+        /// SMILES string (or "SMILES Name").
+        smiles: String,
+        /// Optional molecule name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Target potency (`IC50` / `Ki`) in nM (default `10.0`).
+        #[arg(long, default_value_t = 10.0)]
+        potency_nm: f64,
+        /// Dosing route (`oral` | `iv` | `sc`).
+        #[arg(long, value_enum, default_value = "oral")]
+        route: CliPkRoute,
+        /// Target Product Profile preset (`oral` | `cns` | `peripheral` | `oncology`).
+        #[arg(long, value_enum, default_value = "oral")]
+        tpp: CliTpp,
+        /// ArtCraft push target (`wordcraft` | `deckcraft` | `gridcraft`).
+        #[arg(long, default_value = "wordcraft")]
+        target: String,
+        /// Output directory for PNG, Markdown, TSV, and compiled `.docx`/`.pptx`/`.xlsx`.
+        #[arg(long)]
+        out_dir: PathBuf,
+        /// Attempt live Craft Link v1 push to an open ArtCraft app.
+        #[arg(long)]
+        push_live: bool,
+        /// Print raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
     /// Start the Model Context Protocol (MCP) server on stdio or TCP.
     Mcp {
         /// Authorized directory for reading input files.
@@ -571,6 +600,158 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("{md}");
+            }
+        }
+        Commands::ExportArtcraft {
+            smiles,
+            name,
+            potency_nm,
+            route,
+            tpp,
+            target,
+            out_dir,
+            push_live,
+            json,
+        } => {
+            let (smi, final_name) = split_smiles_and_name(&smiles, name.as_deref());
+            let eval = evaluate_smiles_auto(smi, final_name, tpp.into())?;
+            let cfg = PkSimulationConfig {
+                target_potency_nm: potency_nm.max(0.01),
+                route: route.into(),
+                ..Default::default()
+            };
+            let pk_rep = simulate_human_pk_dose(&eval, &cfg);
+            let svg = render_pk_profile_svg(&pk_rep);
+            std::fs::create_dir_all(&out_dir)?;
+            let svg_path = out_dir.join("pk_profile.svg");
+            std::fs::write(&svg_path, &svg)?;
+
+            let tmp_png = out_dir.join("_pk_raster.png");
+            let png_bytes = if std::process::Command::new("rsvg-convert")
+                .args(["-w", "1600", "-b", "white"])
+                .arg(&svg_path)
+                .args(["-o"])
+                .arg(&tmp_png)
+                .status()
+                .is_ok_and(|s| s.success())
+                && tmp_png.is_file()
+            {
+                let b = std::fs::read(&tmp_png)?;
+                let _ = std::fs::remove_file(&tmp_png);
+                b
+            } else {
+                vec![
+                    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I',
+                    b'H', b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+                    0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, b'I', b'D',
+                    b'A', b'T', 0x08, 0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, 0x05, 0xfe, 0x02,
+                    0xfe, 0xdc, 0xcc, 0x59, 0xe7, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D',
+                    0xae, 0x42, 0x60, 0x82,
+                ]
+            };
+
+            let title = format!("{} — ADMET & Human PK/PBPK Dossier", eval.name);
+            let mpo_s = eval.tpp_mpo.as_ref().map_or_else(
+                || "n/a".to_string(),
+                |m| format!("{:.2}/6.00 ({})", m.score, m.decision),
+            );
+            let rows = vec![
+                ("Compound", eval.name.clone()),
+                ("Formula", eval.physicochemical.formula.clone()),
+                (
+                    "MW (Da)",
+                    format!("{:.2}", eval.physicochemical.molecular_weight),
+                ),
+                (
+                    "Consensus LogP / TPSA",
+                    format!(
+                        "{:.2} / {:.1} Å²",
+                        eval.lipophilicity.consensus_log_p, eval.physicochemical.tpsa
+                    ),
+                ),
+                ("TPP MPO", mpo_s),
+                (
+                    "BCS Class / F_oral",
+                    format!(
+                        "{:?} / {:.1}%",
+                        pk_rep.bcs_class,
+                        pk_rep.oral_bioavailability_f * 100.0
+                    ),
+                ),
+                (
+                    "Consensus t1/2 (h)",
+                    format!("{:.1} h", pk_rep.t_half_consensus_h),
+                ),
+                (
+                    "QD Dose (mg/d)",
+                    format!(
+                        "{:.1} mg ({})",
+                        pk_rep.qd.daily_dose_mg, pk_rep.qd.feasibility
+                    ),
+                ),
+                (
+                    "BID Dose (mg/d)",
+                    format!(
+                        "{:.1} mg ({})",
+                        pk_rep.bid.daily_dose_mg, pk_rep.bid.feasibility
+                    ),
+                ),
+                ("Recommended Regimen", pk_rep.recommended_regimen.clone()),
+            ];
+            let md = render_pk_dose_markdown(&pk_rep);
+            let sum =
+                craftbio_report::export_artcraft_bundle(&title, &png_bytes, &rows, &md, &out_dir)
+                    .map_err(|e| format!("ArtCraft export failed: {e}"))?;
+
+            let mut push_res = None;
+            if push_live {
+                let tgt = craftbio_scene::ArtCraftTarget::parse(&target).ok_or_else(|| {
+                    format!(
+                        "unknown ArtCraft target '{target}' (use wordcraft|deckcraft|gridcraft)"
+                    )
+                })?;
+                let md_path = match tgt {
+                    craftbio_scene::ArtCraftTarget::DeckCraft => sum.deckcraft_slides_md.clone(),
+                    _ => sum.wordcraft_md.clone(),
+                };
+                let native_doc = match tgt {
+                    craftbio_scene::ArtCraftTarget::WordCraft => sum.wordcraft_docx.clone(),
+                    craftbio_scene::ArtCraftTarget::DeckCraft => sum.deckcraft_pptx.clone(),
+                    craftbio_scene::ArtCraftTarget::GridCraft => sum.gridcraft_xlsx.clone(),
+                };
+                let payload = craftbio_scene::ArtCraftPushPayload {
+                    target: tgt,
+                    title,
+                    source_app: "admetcraft".to_string(),
+                    bundle_dir: sum.out_dir.clone(),
+                    figure_png_path: sum.figure_png.clone(),
+                    markdown_path: md_path,
+                    table_tsv_path: sum.gridcraft_tsv.clone(),
+                    native_doc_path: native_doc,
+                    summary_markdown: md,
+                };
+                push_res = Some(craftbio_scene::push_to_artcraft_via_craft_link(
+                    None, &payload,
+                )?);
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "bundle": sum,
+                        "pk_svg": svg_path.display().to_string(),
+                        "push": push_res,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Exported AdmetCraft ArtCraft bundle -> {} (DOCX={:?}, PPTX={:?}, XLSX={:?})",
+                    sum.out_dir, sum.wordcraft_docx, sum.deckcraft_pptx, sum.gridcraft_xlsx
+                );
+                if let Some(pr) = push_res {
+                    println!("{}", pr.message);
+                }
             }
         }
         Commands::Mcp {
