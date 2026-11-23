@@ -676,6 +676,15 @@ pub fn train_endpoint_gbdt(
                     neg_scores.push(p);
                 }
             }
+            // The floor at 0.15 is not a detail of numerical hygiene: it decides what the
+            // reported coverage means. Split conformal guarantees ~90% coverage *at the
+            // quantile it computes*; raising that quantile to 0.15 widens the prediction set,
+            // which pushes measured coverage above 90% while turning more predictions into
+            // the uninformative {0,1} set that contains both labels. On the shipped v1 pack,
+            // 9 of 25 binary endpoints sit exactly on this floor, mean coverage reads 93.4%,
+            // and the mean singleton (informative) rate is 0.538 — so roughly half of the
+            // predictions say nothing. Read `conformal_singleton_rate` alongside coverage;
+            // coverage on its own is not a quality measure once this floor is in play.
             let q_neg = conformal_quantile(&mut neg_scores, 0.90).clamp(0.15, 0.99);
             let q_pos = conformal_quantile(&mut pos_scores, 0.90).clamp(0.15, 0.99);
             (pa, pb, 0.0, q_neg, q_pos)

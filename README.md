@@ -3,7 +3,7 @@
 **Local-First, Pure-Rust Quantitative ADMET, QSAR + Tox21 (32 TDC Endpoints + 90% Conformal CI + Applicability Domain), SEA Off-Target Fishing, Phase I/II Metabolite Guard, Mechanistic IVIVE → Minimal-PBPK Human Therapeutic Dose Simulator & TPP MPO Workbench** (`#![forbid(unsafe_code)]`).
 
 **AdmetCraft v1.2** combines exact physicochemical, ionization ($\text{p}K_a$/$\log D_{7.4}$), solubility, druglikeness (**QED**, **Pfizer CNS MPO**, **Lipinski/Ghose/Veber/Egan/Muegge**, **Pfizer 3/75**, **GSK 4/400**, **Golden Triangle**, **Ro3**, **bRo5**), and structural alerts (**PAINS** / **Brenk**) with:
-- **32 pure-Rust trained TDC QSAR GBDT models** (20 core ADMET + **12 Tox21 Nuclear Receptor & Cellular Stress pathways**, mean held-out Bemis-Murcko scaffold **ROC AUC = 0.833**, mean 90% conformal coverage **92.7%**),
+- **32 pure-Rust trained TDC QSAR GBDT models** (20 core ADMET + **12 Tox21 Nuclear Receptor & Cellular Stress pathways**, mean held-out Bemis-Murcko scaffold **ROC AUC = 0.833**, mean 90% conformal coverage **92.7%** — read with the singleton rate below, not on its own),
 - **Local SEA (*Similarity Ensemble Approach*) Off-Target Fishing** against the curated **Bowes Safety-20** human anti-target panel (`< 2 ms`/compound, hardware POPCNT ECFP4 Tanimoto + Gumbel E-values, extensible via `build-sea-index`),
 - **Phase I/II Metabolite Guard** (11 deterministic graph biotransformations: benzylic/allylic/aromatic hydroxylation, O-/N-dealkylation, furan/thiophene/alkene epoxidation, aniline N-hydroxylation, thioether S-oxidation, ester hydrolysis, phenolic O-glucuronidation/sulfation, acyl-glucuronidation, and NAPQI-type quinone-imine oxidation — automatically re-screened for reactive bioactivation & DILI/AMES/hERG toxicity escalation),
 - **Mechanistic IVIVE → Minimal-PBPK Human Therapeutic Dose Simulator (`pk-dose`)**: scales calibrated QSAR `f_u,p`, `CLint`, `VDss`, `Caco-2`, `HIA`, and FaSSIF pH 6.5 solubility (Henderson-Hasselbalch ionization + bile-salt micelles + Butler-Dressman DCS dynamic sink) through Austin (2002) `fu_inc`, the well-stirred liver model, and a mass-conserving 4th-order Runge-Kutta (`RK4`) multi-compartment ODE engine (`Oral | IV | SC` + optional saturable TMDD clearance hook for peptides/biologics), propagating 90% Split Conformal QSAR intervals via 200-draw deterministic Monte Carlo into QD/BID human dose brackets, hERG margins, BCS Class I–IV, and standalone SVG `C_u(t)` profiles,
@@ -30,6 +30,16 @@ All **32 models** (20 core ADMET + **12 official Tox21 cellular toxicity & nucle
 - **Pre-trained model pack download:** Download `admetcraft-tdc-models-v1.1.0.json.gz` from the GitHub Release assets, decompress (`gunzip`), and place at `$CRAFT_DATA_DIR/models/admetcraft_v1/admetcraft_tdc_v1.json` (with `CRAFT_DATA_DIR` unset, `$XDG_DATA_HOME/CraftBio/models/admetcraft_v1/admetcraft_tdc_v1.json`).
 - **Re-training from raw TDC datasets:** Raw `.tab` files originate from official Harvard Dataverse / [Therapeutics Data Commons (`PyTDC`)](https://tdcommons.ai) (including `tox21.tab`, Dataverse ID `4259612`), placed in `$CRAFT_DATA_DIR/models/tdc_raw/`.
 - **v1.1.0 Held-Out Scaffold Summary (32 endpoints):** Mean Classification Scaffold **ROC AUC = 0.833** (`25` endpoints: `0.856` on 13 core ADMET, `0.811` across 12 Tox21 incl. `SR-MMP 0.906` & `NR-AhR 0.902`) | Mean Regression Scaffold **Spearman ρ = 0.668** (`7` endpoints) | Mean **90% Split-Conformal Coverage = 92.7%**.
+
+> **How to read the coverage figure.** The conformal quantile has a floor of `0.15`
+> (`gbdt.rs`, `clamp(0.15, 0.99)`). Where the data would put it lower, the floor widens the
+> prediction set instead: coverage goes **above** the nominal 90%, and more predictions come back
+> as the uninformative `{0,1}` set that contains both labels. In the shipped v1 pack **9 of the 25
+> binary endpoints sit exactly on that floor**, and the mean singleton (informative) rate is
+> **0.538** — about half the predictions do not commit to a label. Three endpoints are extreme:
+> `tox21_nr_ar_lbd` 99.2% coverage at a 15.9% informative rate, `tox21_nr_ar` 99.4% / 22.9%, and
+> `dili` 97.9% / 17.9%. Each model carries its own `conformal_singleton_rate`; use the pair.
+> High coverage with a low singleton rate means the model is abstaining, not succeeding.
 
 ### Core 20 ADMET Endpoints Reference Table
 
