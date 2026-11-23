@@ -59,7 +59,24 @@ fn qsar_ep<'a>(
     qsar.and_then(|q| q.endpoints.iter().find(|e| e.endpoint_id == id))
 }
 
+/// Like [`qsar_ep`], but records the endpoint id when no trained prediction exists, so the
+/// report can say which of its inputs are correlations rather than model output.
+fn qsar_ep_tracked<'a>(
+    qsar: Option<&'a QsarAdmetReport>,
+    id: &str,
+    estimated: &mut Vec<String>,
+) -> Option<&'a admet_calc::QsarEndpointPrediction> {
+    let found = qsar_ep(qsar, id);
+    if found.is_none() {
+        estimated.push(id.to_string());
+    }
+    found
+}
+
 struct BaselineQsarInputs {
+    /// Endpoint ids that fell back to a logD correlation because the QSAR pack did not
+    /// provide them. Empty means every input below came from a trained model.
+    estimated: Vec<String>,
     ppbr: (f64, f64, f64),
     cl_mic: (f64, f64, f64),
     vdss: (f64, f64, f64),
@@ -75,11 +92,12 @@ struct BaselineQsarInputs {
 
 fn extract_baseline_and_ci90(eval: &MoleculeEvaluation) -> BaselineQsarInputs {
     let qsar = eval.qsar.as_ref();
+    let mut estimated: Vec<String> = Vec::new();
     let logd = eval.ionization.logd_ph74;
     let mw = eval.physicochemical.molecular_weight.max(50.0);
 
     // 1. PPBR (%)
-    let ppbr = if let Some(ep) = qsar_ep(qsar, "ppbr_az") {
+    let ppbr = if let Some(ep) = qsar_ep_tracked(qsar, "ppbr_az", &mut estimated) {
         let med = ep.value.clamp(1.0, 99.5);
         let lo = ep.ci90_low.clamp(1.0, med);
         let hi = ep.ci90_high.clamp(med, 99.5);
@@ -91,7 +109,7 @@ fn extract_baseline_and_ci90(eval: &MoleculeEvaluation) -> BaselineQsarInputs {
     };
 
     // 2. Microsomal CLint (uL/min/mg)
-    let cl_mic = if let Some(ep) = qsar_ep(qsar, "clearance_microsome_az") {
+    let cl_mic = if let Some(ep) = qsar_ep_tracked(qsar, "clearance_microsome_az", &mut estimated) {
         let med = ep.linear_value.unwrap_or(20.0).clamp(1.0, 1500.0);
         let ci = ep.linear_ci90.unwrap_or([med * 0.4, med * 2.5]);
         (med, ci[0].clamp(0.5, med), ci[1].clamp(med, 2500.0))
@@ -101,7 +119,7 @@ fn extract_baseline_and_ci90(eval: &MoleculeEvaluation) -> BaselineQsarInputs {
     };
 
     // 3. VDss (L/kg)
-    let vdss = if let Some(ep) = qsar_ep(qsar, "vdss_lombardo") {
+    let vdss = if let Some(ep) = qsar_ep_tracked(qsar, "vdss_lombardo", &mut estimated) {
         let med = ep.linear_value.unwrap_or(1.2).clamp(0.08, 40.0);
         let ci = ep.linear_ci90.unwrap_or([med * 0.45, med * 2.2]);
         (med, ci[0].clamp(0.06, med), ci[1].clamp(med, 60.0))
@@ -119,7 +137,7 @@ fn extract_baseline_and_ci90(eval: &MoleculeEvaluation) -> BaselineQsarInputs {
     };
 
     // 4. Caco-2 (log10 cm/s)
-    let caco2 = if let Some(ep) = qsar_ep(qsar, "caco2_wang") {
+    let caco2 = if let Some(ep) = qsar_ep_tracked(qsar, "caco2_wang", &mut estimated) {
         let med = ep.value.clamp(-7.2, -3.8);
         let lo = ep.ci90_low.clamp(-7.5, med);
         let hi = ep.ci90_high.clamp(med, -3.5);
@@ -136,15 +154,16 @@ fn extract_baseline_and_ci90(eval: &MoleculeEvaluation) -> BaselineQsarInputs {
     // Intrinsic neutral aqueous solubility (AqSolDB / ESOL) adjusted via Henderson-Hasselbalch
     // ionization at duodenal pH 6.5 (capped at 50x for common-ion/salt limit) and Mithani/Glomme
     // FaSSIF bile-salt micellar solubilization (3 mM taurocholate, capped at 20x; total cap 100x).
-    let sol_water_mg_ml = if let Some(ep) = qsar_ep(qsar, "solubility_aqsoldb") {
-        let mol_l = 10.0_f64.powf(ep.value.clamp(-9.0, 1.0));
-        (mol_l * mw).clamp(1.0e-5, 1000.0)
-    } else {
-        eval.water_solubility
-            .esol
-            .solubility_mg_ml
-            .clamp(1.0e-5, 1000.0)
-    };
+    let sol_water_mg_ml =
+        if let Some(ep) = qsar_ep_tracked(qsar, "solubility_aqsoldb", &mut estimated) {
+            let mol_l = 10.0_f64.powf(ep.value.clamp(-9.0, 1.0));
+            (mol_l * mw).clamp(1.0e-5, 1000.0)
+        } else {
+            eval.water_solubility
+                .esol
+                .solubility_mg_ml
+                .clamp(1.0e-5, 1000.0)
+        };
     let acid_ion = eval
         .ionization
         .strongest_acidic_pka
@@ -159,47 +178,47 @@ fn extract_baseline_and_ci90(eval: &MoleculeEvaluation) -> BaselineQsarInputs {
     let total_gi_boost = (ion_boost * fassif_micelle).min(100.0);
     let sol_mg_ml = (sol_water_mg_ml * total_gi_boost).clamp(1.0e-5, 1000.0);
 
-    let half_life_obach = qsar_ep(qsar, "half_life_obach")
+    let half_life_obach = qsar_ep_tracked(qsar, "half_life_obach", &mut estimated)
         .and_then(|e| e.linear_value)
         .map(|v| v.clamp(0.25, 240.0));
 
-    let cyp3a4 = qsar_ep(qsar, "cyp3a4_veith").map(|e| e.value).unwrap_or(
-        if eval.pharmacokinetics.cyp3a4_inhibitor {
+    let cyp3a4 = qsar_ep_tracked(qsar, "cyp3a4_veith", &mut estimated)
+        .map(|e| e.value)
+        .unwrap_or(if eval.pharmacokinetics.cyp3a4_inhibitor {
             0.7
         } else {
             0.2
-        },
-    );
-    let pgp = qsar_ep(qsar, "pgp_broccatelli").map(|e| e.value).unwrap_or(
-        if eval.pharmacokinetics.pgp_substrate {
+        });
+    let pgp = qsar_ep_tracked(qsar, "pgp_broccatelli", &mut estimated)
+        .map(|e| e.value)
+        .unwrap_or(if eval.pharmacokinetics.pgp_substrate {
             0.7
         } else {
             0.2
-        },
-    );
-    let bbb = qsar_ep(qsar, "bbb_martins").map(|e| e.value).unwrap_or(
-        if eval.pharmacokinetics.bbb_permeant {
+        });
+    let bbb = qsar_ep_tracked(qsar, "bbb_martins", &mut estimated)
+        .map(|e| e.value)
+        .unwrap_or(if eval.pharmacokinetics.bbb_permeant {
             0.8
         } else {
             0.2
-        },
-    );
-    let hia = qsar_ep(qsar, "hia_hou").map(|e| e.value).unwrap_or(
-        match eval.pharmacokinetics.gi_absorption {
+        });
+    let hia = qsar_ep_tracked(qsar, "hia_hou", &mut estimated)
+        .map(|e| e.value)
+        .unwrap_or(match eval.pharmacokinetics.gi_absorption {
             admet_calc::AbsorptionLevel::High => 0.85,
             admet_calc::AbsorptionLevel::Low => 0.35,
-        },
-    );
-    let herg =
-        qsar_ep(qsar, "herg_karim")
-            .map(|e| e.value)
-            .unwrap_or(match eval.safety.herg_risk {
-                HergRisk::Low => 0.15,
-                HergRisk::Moderate => 0.50,
-                HergRisk::High => 0.85,
-            });
+        });
+    let herg = qsar_ep_tracked(qsar, "herg_karim", &mut estimated)
+        .map(|e| e.value)
+        .unwrap_or(match eval.safety.herg_risk {
+            HergRisk::Low => 0.15,
+            HergRisk::Moderate => 0.50,
+            HergRisk::High => 0.85,
+        });
 
     BaselineQsarInputs {
+        estimated,
         ppbr,
         cl_mic,
         vdss,
@@ -588,6 +607,7 @@ pub fn simulate_human_pk_dose(
 ) -> PbpkHumanDoseReport {
     let mw = eval.physicochemical.molecular_weight.max(50.0);
     let BaselineQsarInputs {
+        estimated,
         ppbr,
         cl_mic,
         vdss,
@@ -600,6 +620,7 @@ pub fn simulate_human_pk_dose(
         hia: hia_p,
         herg: herg_p,
     } = extract_baseline_and_ci90(eval);
+    let qsar_pack_loaded = eval.qsar.is_some();
 
     let base = build_pk_params(
         eval, ppbr.0, cl_mic.0, vdss.0, caco2.0, sol_mg_ml, cyp3a4_p, pgp_p, bbb_p,
@@ -750,6 +771,26 @@ pub fn simulate_human_pk_dose(
     };
 
     let mut warnings = Vec::new();
+
+    // Say it first, before any number is read: with no trained pack behind these inputs the
+    // dose and its interval are structural estimates from a logD correlation, not
+    // predictions. Silence here is what made the output indistinguishable from a real one.
+    if !qsar_pack_loaded {
+        warnings.push(
+            "No QSAR model pack is loaded: every ADMET input below is a logD-based \
+             correlation, not a trained prediction. The dose and its 90% interval are \
+             structural estimates — install the model pack before using them."
+                .to_string(),
+        );
+    } else if !estimated.is_empty() {
+        warnings.push(format!(
+            "No QSAR model pack entry for {}: {} input(s) fell back to a logD-based \
+             correlation rather than a trained prediction.",
+            estimated.join(", "),
+            estimated.len()
+        ));
+    }
+
     if let Some(ob) = t_half_obach {
         let ratio = (t_half_ivive_h / ob.max(0.1)).max(ob / t_half_ivive_h.max(0.1));
         if ratio > 3.0 {
@@ -811,6 +852,8 @@ pub fn simulate_human_pk_dose(
         recommended_regimen,
         steady_state_curve,
         warnings,
+        qsar_pack_loaded,
+        estimated_inputs: estimated,
     }
 }
 
@@ -823,6 +866,16 @@ pub fn render_pk_dose_markdown(r: &PbpkHumanDoseReport) -> String {
         "# Human PK / Minimal-PBPK Therapeutic Dose Report: {}\n",
         r.molecule_name
     );
+    // Before any number: a reader must not have to reach the warnings section to learn
+    // that nothing here came out of a trained model.
+    if !r.qsar_pack_loaded {
+        let _ = writeln!(
+            md,
+            "> **No QSAR model pack loaded.** Every ADMET input below is a logD-based \
+             correlation, not a trained prediction, and the dose and its 90% interval are \
+             structural estimates. Install the model pack before using these numbers.\n"
+        );
+    }
     let _ = writeln!(
         md,
         "- **SMILES:** `{}` | **MW:** `{:.2} Da` | **Route:** `{}` | **BCS:** `{}`",
@@ -926,6 +979,45 @@ mod tests {
     use super::*;
     use crate::evaluate_smiles_full;
     use admet_calc::TppPreset;
+
+    /// Audit findings F3-14 and F4a-07: with no QSAR model pack installed, every endpoint
+    /// falls back to a correlation on logD and the report still reads like a measured
+    /// prediction — a human dose with a "90% CI" built from fixed multipliers. The caller
+    /// has no way to tell. `model_info` does say there is no pack; this report did not.
+    #[test]
+    fn a_dose_computed_without_a_model_pack_says_so() -> Result<(), Box<dyn std::error::Error>> {
+        // evaluate_smiles_full with no pack path: eval.qsar stays None.
+        let eval = evaluate_smiles_full(
+            "CC(=O)Oc1ccccc1C(=O)O",
+            Some("Aspirin"),
+            None,
+            TppPreset::OralSmallMolecule,
+        )?;
+        assert!(
+            eval.qsar.is_none(),
+            "this test needs the no-pack path to be the one under test"
+        );
+
+        let report = simulate_human_pk_dose(&eval, &PkSimulationConfig::default());
+
+        assert!(
+            !report.qsar_pack_loaded,
+            "the report must record that no QSAR pack backed these numbers"
+        );
+        assert!(
+            !report.estimated_inputs.is_empty(),
+            "the endpoints that fell back to a correlation must be named"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.to_ascii_lowercase().contains("no qsar model pack")),
+            "a reader of the warnings must be told, got: {:?}",
+            report.warnings
+        );
+        Ok(())
+    }
 
     #[test]
     fn rk4_iv_bolus_conserves_mass_to_analytical_auc_within_2_pct()
