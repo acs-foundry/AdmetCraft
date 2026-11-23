@@ -262,6 +262,8 @@ mod tests {
                 },
             ],
             warnings: Vec::new(),
+            qsar_pack_loaded: true,
+            estimated_inputs: Vec::new(),
         };
         let pk_svg = render_pk_profile_svg(&pk_rep);
         assert!(

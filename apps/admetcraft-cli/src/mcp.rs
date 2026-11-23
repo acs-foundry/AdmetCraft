@@ -861,18 +861,28 @@ fn collect_smiles_inputs(args: &Value) -> Result<Vec<String>, SmilesInputError> 
         ));
     };
     let mut lines = Vec::new();
-    if let Some(s) = raw.as_str() {
-        for l in s.lines() {
+
+    // The cap must count *molecules*, not JSON values. Every input ends up joined with
+    // `\n` and split again downstream, so an array element holding newlines expands into
+    // as many molecules as it has lines. Both branches therefore split the same way.
+    fn push_split(text: &str, lines: &mut Vec<String>) -> Result<(), SmilesInputError> {
+        for l in text.lines() {
             let t = l.trim();
-            if !t.is_empty() {
-                lines.push(t.to_string());
-                if lines.len() > MAX_MCP_MOLECULES {
-                    return Err(SmilesInputError::BatchLimitExceeded(format!(
-                        "batch exceeds maximum allowed {MAX_MCP_MOLECULES} molecules per MCP call"
-                    )));
-                }
+            if t.is_empty() {
+                continue;
+            }
+            lines.push(t.to_string());
+            if lines.len() > MAX_MCP_MOLECULES {
+                return Err(SmilesInputError::BatchLimitExceeded(format!(
+                    "batch exceeds maximum allowed {MAX_MCP_MOLECULES} molecules per MCP call"
+                )));
             }
         }
+        Ok(())
+    }
+
+    if let Some(s) = raw.as_str() {
+        push_split(s, &mut lines)?;
     } else if let Some(arr) = raw.as_array() {
         for (idx, item) in arr.iter().enumerate() {
             let Some(s) = item.as_str() else {
@@ -880,15 +890,7 @@ fn collect_smiles_inputs(args: &Value) -> Result<Vec<String>, SmilesInputError> 
                     "invalid params: 'smiles[{idx}]' must be a string"
                 )));
             };
-            let t = s.trim();
-            if !t.is_empty() {
-                lines.push(t.to_string());
-                if lines.len() > MAX_MCP_MOLECULES {
-                    return Err(SmilesInputError::BatchLimitExceeded(format!(
-                        "batch exceeds maximum allowed {MAX_MCP_MOLECULES} molecules per MCP call"
-                    )));
-                }
-            }
+            push_split(s, &mut lines)?;
         }
     } else {
         return Err(SmilesInputError::InvalidParams(
@@ -968,6 +970,45 @@ fn eval_lines(lines: &[String], tpp: TppPreset) -> (Vec<MoleculeEvaluation>, Vec
     (evaluate_batch_auto(&mols, tpp), errors)
 }
 
+/// Cut file content down to at most `MAX_MCP_MOLECULES` records **before** parsing it.
+///
+/// A cap applied with `.take(n)` after the parser has already built the whole vector is no
+/// cap at all: the memory is spent before the first element is dropped. A 10 MiB `.smi`
+/// file is inside the sandbox read limit and still exhausted a 3 GB budget this way.
+///
+/// `sdf` records end at `$$$$`; `csv` keeps the header row; anything else is one molecule
+/// per line.
+#[must_use]
+fn truncate_to_record_cap<'a>(content: &'a str, ext: &str) -> &'a str {
+    let line_cap = |keep_header: bool| -> &'a str {
+        let wanted = MAX_MCP_MOLECULES + usize::from(keep_header);
+        let mut seen = 0usize;
+        for (idx, _) in content.match_indices('\n') {
+            seen += 1;
+            if seen == wanted {
+                return &content[..idx];
+            }
+        }
+        content
+    };
+
+    match ext {
+        "sdf" | "mol" => {
+            let mut seen = 0usize;
+            for (idx, _) in content.match_indices("$$$$") {
+                seen += 1;
+                if seen == MAX_MCP_MOLECULES {
+                    let end = (idx + 4).min(content.len());
+                    return &content[..end];
+                }
+            }
+            content
+        }
+        "csv" => line_cap(true),
+        _ => line_cap(false),
+    }
+}
+
 fn tool_evaluate_smiles(args: &Value, sandbox: &PathSandbox) -> Result<Value, String> {
     let tpp = parse_tpp_preset(args);
     if let Some(file_val) = args.get("file")
@@ -986,10 +1027,12 @@ fn tool_evaluate_smiles(args: &Value, sandbox: &PathSandbox) -> Result<Value, St
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+        // Cap the input before parsing: `.take()` afterwards spends the memory first.
+        let content = truncate_to_record_cap(&content, &ext);
         let mut mols = Vec::new();
         let mut errors = Vec::new();
         if ext == "sdf" || ext == "mol" {
-            for (i, res) in parse_sdf(&content)
+            for (i, res) in parse_sdf(content)
                 .into_iter()
                 .take(MAX_MCP_MOLECULES)
                 .enumerate()
@@ -1000,7 +1043,7 @@ fn tool_evaluate_smiles(args: &Value, sandbox: &PathSandbox) -> Result<Value, St
                 }
             }
         } else if ext == "csv" {
-            match parse_csv_batch(&content) {
+            match parse_csv_batch(content) {
                 Ok(items) => {
                     for (i, res) in items.into_iter().take(MAX_MCP_MOLECULES).enumerate() {
                         match res {
@@ -1012,7 +1055,7 @@ fn tool_evaluate_smiles(args: &Value, sandbox: &PathSandbox) -> Result<Value, St
                 Err(e) => return Ok(tool_err(format!("CSV parse error: {e}"))),
             }
         } else {
-            for (line_no, raw, res) in parse_smiles_batch(&content)
+            for (line_no, raw, res) in parse_smiles_batch(content)
                 .into_iter()
                 .take(MAX_MCP_MOLECULES)
             {
@@ -1394,4 +1437,108 @@ fn tool_predict_human_pk_dose(args: &Value, sandbox: &PathSandbox) -> Result<Val
     );
     let payload = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
     Ok(tool_ok(summary, payload))
+}
+
+#[cfg(test)]
+mod batch_limit_tests {
+    use super::*;
+
+    /// Audit finding F3-12: the per-call molecule cap counted *array elements*, but each
+    /// element is later joined with `\n` and split again by `parse_smiles_batch`. One
+    /// element holding 3000 lines sailed past a cap of 1000 and came back as
+    /// "Matched 3000/3000" in a 14.7 MB response.
+    #[test]
+    fn newlines_inside_an_array_element_cannot_smuggle_past_the_batch_cap() {
+        let smuggled = (0..3000).map(|_| "CCO").collect::<Vec<_>>().join("\n");
+        let args = json!({ "smiles": [smuggled] });
+        let verdict = match collect_smiles_inputs(&args) {
+            Err(SmilesInputError::BatchLimitExceeded(_)) => "rejected".to_string(),
+            Err(SmilesInputError::InvalidParams(e)) => format!("invalid params: {e}"),
+            Ok(lines) => format!("accepted as {} input(s)", lines.len()),
+        };
+        assert_eq!(
+            verdict, "rejected",
+            "3000 molecules smuggled in one array element must hit the batch cap"
+        );
+    }
+
+    /// The same cap must hold however the molecules are spread across elements.
+    #[test]
+    fn the_batch_cap_counts_molecules_not_array_elements() {
+        let half = (0..600).map(|_| "CCO").collect::<Vec<_>>().join("\n");
+        let args = json!({ "smiles": [half.clone(), half] });
+        assert!(
+            matches!(
+                collect_smiles_inputs(&args),
+                Err(SmilesInputError::BatchLimitExceeded(_))
+            ),
+            "1200 molecules across two elements must exceed the cap of {MAX_MCP_MOLECULES}"
+        );
+
+        // ...and an honest batch still works, with surrounding whitespace tolerated.
+        let args = json!({ "smiles": ["CCO", "  c1ccccc1  ", "CC(=O)O"] });
+        let lines = collect_smiles_inputs(&args).unwrap_or_default();
+        assert_eq!(lines, vec!["CCO", "c1ccccc1", "CC(=O)O"]);
+
+        // A single string with newlines keeps working: that path was already correct.
+        let args = json!({ "smiles": "CCO\n\nc1ccccc1\n" });
+        let lines = collect_smiles_inputs(&args).unwrap_or_default();
+        assert_eq!(lines, vec!["CCO", "c1ccccc1"]);
+    }
+}
+
+#[cfg(test)]
+mod record_cap_tests {
+    use super::*;
+
+    /// Audit finding F3-13: the per-call cap was applied with `.take()` *after* the parser
+    /// had built the whole vector, so a 10 MiB `.smi` file — well inside the sandbox read
+    /// limit — exhausted a 3 GB memory budget before a single record was dropped.
+    #[test]
+    fn smiles_files_are_cut_to_the_record_cap_before_parsing() {
+        let many = (0..5_000).map(|_| "CCO").collect::<Vec<_>>().join("\n");
+        let cut = truncate_to_record_cap(&many, "smi");
+        assert_eq!(
+            cut.lines().count(),
+            MAX_MCP_MOLECULES,
+            "a {}-line file must be cut to the cap before parsing",
+            many.lines().count()
+        );
+        assert!(cut.len() < many.len());
+    }
+
+    #[test]
+    fn csv_keeps_its_header_row_within_the_cap() {
+        let mut rows = vec!["smiles,name".to_string()];
+        rows.extend((0..5_000).map(|i| format!("CCO,mol{i}")));
+        let csv = rows.join("\n");
+        let cut = truncate_to_record_cap(&csv, "csv");
+        assert_eq!(cut.lines().count(), MAX_MCP_MOLECULES + 1);
+        assert!(
+            cut.starts_with("smiles,name"),
+            "the header must survive the cut"
+        );
+    }
+
+    #[test]
+    fn sdf_is_cut_on_record_boundaries() {
+        let record = "mol\n  audit\n\n  0  0  0  0  0  0  0  0  0  0999 V2000\nM  END\n$$$$\n";
+        let many = record.repeat(5_000);
+        let cut = truncate_to_record_cap(&many, "sdf");
+        assert_eq!(
+            cut.matches("$$$$").count(),
+            MAX_MCP_MOLECULES,
+            "must keep whole records, not bytes"
+        );
+        assert!(cut.ends_with("$$$$"), "must not cut mid-record");
+    }
+
+    #[test]
+    fn content_below_the_cap_is_returned_untouched() {
+        let small = "CCO\nc1ccccc1\nCC(=O)O";
+        assert_eq!(truncate_to_record_cap(small, "smi"), small);
+        assert_eq!(truncate_to_record_cap("", "smi"), "");
+        let one_sdf = "mol\n$$$$\n";
+        assert_eq!(truncate_to_record_cap(one_sdf, "sdf"), one_sdf);
+    }
 }

@@ -785,6 +785,16 @@ pub struct PbpkHumanDoseReport {
     pub recommended_regimen: String,
     pub steady_state_curve: Vec<PkTimePoint>,
     pub warnings: Vec<String>,
+    /// Whether a trained QSAR model pack backed these numbers.
+    ///
+    /// With no pack installed every endpoint falls back to a correlation on logD, and the
+    /// dose and its interval are structural estimates, not predictions. A caller that does
+    /// not check this cannot tell the two apart.
+    #[serde(default)]
+    pub qsar_pack_loaded: bool,
+    /// Endpoints that fell back to a correlation because the pack did not provide them.
+    #[serde(default)]
+    pub estimated_inputs: Vec<String>,
 }
 
 /// Complete ADMET evaluation for one molecule.
