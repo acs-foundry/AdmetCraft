@@ -58,9 +58,15 @@ All **32 models** (20 core ADMET + **12 official Tox21 cellular toxicity & nucle
 
 **Summary:** Mean Classification Scaffold ROC AUC = **0.856** (`13` endpoints) | Mean Regression Scaffold Spearman $\rho$ = **0.668** (`7` endpoints) | Mean 90% Split-Conformal Coverage = **91.1%**.
 
-### Physicochemical & Rule Parity (Verified vs RDKit 2026.9.2 / Indigo 1.49.0 / SwissADME)
+### Physicochemical & Rule Parity (clean-room study, see the caveat)
 
-- **TPSA (S&P and N/O only):** `MAE = 0.0000` (45/45 exact); **Exact Mass** max err `0.00005 Da`; **MW** MAE `0.0038 Da`; **MR** $r = 0.9997$; **WLOGP** $r = 0.9844$; **QED** $r = 0.9723$; **PAINS** `45/45` (100%) and **Brenk** `45/45` (100%).
+> **What is in this repository:** `tests/fixtures/reference_molecules.json` holds **15 molecules** with
+> published reference *ranges*, not the 45-molecule comparison the figures below were taken from, and there
+> is no script here that reproduces them against RDKit or Indigo. Until that comparison and its output are
+> committed, read the numbers below as a record of a study done elsewhere, not as something you can verify
+> from this checkout.
+
+- Reported from that study: **TPSA (S&P and N/O only)** `MAE = 0.0000`; **Exact Mass** max err `0.00005 Da`; **MW** MAE `0.0038 Da`; **MR** $r = 0.9997$; **WLOGP** $r = 0.9844$; **QED** $r = 0.9723$; **PAINS** and **Brenk** agreement 100%. Sample size 45 molecules; the fixture committed here covers 15 of them.
 - **Honest Scope:** `half_life_obach` ($\rho = 0.312$) and `bioavailability_ma` (AUC `0.643`) reflect inherent in vivo pharmacokinetic variability; predictions outside the training applicability domain (`Out-of-Domain`, max ECFP4 Tanimoto `< 0.25`) automatically inflate their 90% conformal uncertainty bands and flag `Uncertain (Both)` rather than fabricating high confidence.
 
 ---
