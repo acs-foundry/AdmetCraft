@@ -356,33 +356,36 @@ pub fn draw_boiled_egg_interactive(
 
     if let Some(hi) = hovered_idx {
         let e = &evals[hi];
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("egg_hover"), |ui| {
-            ui.set_min_width(180.0);
-            ui.strong(&e.name);
-            ui.label(format!(
-                "WLOGP: {:.2}  |  TPSA: {:.2} A^2",
-                e.boiled_egg.wlogp, e.boiled_egg.tpsa
-            ));
-            ui.label(format!(
-                "GI: {}  |  BBB: {}  |  PGP (exp.): {}",
-                e.pharmacokinetics.gi_absorption.as_str(),
-                if e.pharmacokinetics.bbb_permeant {
-                    "Yes"
-                } else {
-                    "No"
-                },
-                if e.boiled_egg.pgp_substrate {
-                    "PGP+"
-                } else {
-                    "PGP-"
+        egui::Tooltip::for_widget(&response)
+            .at_pointer()
+            .show(|ui| {
+                ui.set_min_width(180.0);
+                ui.strong(&e.name);
+                ui.label(format!(
+                    "WLOGP: {:.2}  |  TPSA: {:.2} A^2",
+                    e.boiled_egg.wlogp, e.boiled_egg.tpsa
+                ));
+                ui.label(format!(
+                    "GI: {}  |  BBB: {}  |  PGP (exp.): {}",
+                    e.pharmacokinetics.gi_absorption.as_str(),
+                    if e.pharmacokinetics.bbb_permeant {
+                        "Yes"
+                    } else {
+                        "No"
+                    },
+                    if e.boiled_egg.pgp_substrate {
+                        "PGP+"
+                    } else {
+                        "PGP-"
+                    }
+                ));
+                if let Some(mol) = mol_cache.get(&e.canonical_smiles) {
+                    let (srect, _) =
+                        ui.allocate_exact_size(Vec2::new(170.0, 110.0), Sense::hover());
+                    let spainter = ui.painter_at(srect);
+                    draw_cached_molecule_2d(&spainter, mol, srect, dark_mode);
                 }
-            ));
-            if let Some(mol) = mol_cache.get(&e.canonical_smiles) {
-                let (srect, _) = ui.allocate_exact_size(Vec2::new(170.0, 110.0), Sense::hover());
-                let spainter = ui.painter_at(srect);
-                draw_cached_molecule_2d(&spainter, mol, srect, dark_mode);
-            }
-        });
+            });
     }
 
     clicked_idx

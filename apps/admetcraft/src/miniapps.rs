@@ -219,7 +219,7 @@ impl WorkspaceWindows {
     }
 }
 
-/// Compute a safe initial window position clamped inside `screen` (`ctx.screen_rect()`).
+/// Compute a safe initial window position clamped inside `screen` (`ctx.content_rect()`).
 #[must_use]
 pub fn clamped_window_pos(screen: egui::Rect, offset: [f32; 2]) -> egui::Pos2 {
     let min_x = screen.left() + 24.0;
@@ -231,7 +231,7 @@ pub fn clamped_window_pos(screen: egui::Rect, offset: [f32; 2]) -> egui::Pos2 {
     egui::pos2(x, y)
 }
 
-/// Compute the expanded floating window size relative to `screen` (`ctx.screen_rect()`).
+/// Compute the expanded floating window size relative to `screen` (`ctx.content_rect()`).
 #[must_use]
 pub fn expanded_window_size(screen: egui::Rect) -> egui::Vec2 {
     egui::vec2(

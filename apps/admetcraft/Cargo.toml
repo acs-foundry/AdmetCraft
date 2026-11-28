@@ -3,6 +3,7 @@ name = "admetcraft"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true
@@ -13,5 +14,7 @@ admet-calc = { path = "../../crates/admet-calc" }
 admet-qsar = { path = "../../crates/admet-qsar" }
 admet-report = { path = "../../crates/admet-report" }
 admet-engine = { path = "../../crates/admet-engine" }
+craftbio-ui.workspace = true
 eframe.workspace = true
 egui.workspace = true
+serde.workspace = true

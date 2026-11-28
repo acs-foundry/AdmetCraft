@@ -8,6 +8,7 @@ mod tutorials;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use admet_calc::{
     ApplicabilityDomainStatus, HergRisk, MetabolismRisk, MoleculeEvaluation, PkRoute,
@@ -21,8 +22,16 @@ use admet_report::{ExportFormat, write_report_to_writer};
 use chem_core::{
     Molecule, ensure_2d_coords, parse_csv_batch, parse_sdf, parse_smiles, parse_smiles_batch,
 };
+use craftbio_ui::craft_dialogs::{Answer, Dialogs};
+use craftbio_ui::craft_settings::{Location, Settings, SettingsStore};
+use craftbio_ui::{
+    AppAccent, CommonUiPrefs, CraftBioTheme, ThemeMode, WindowConfig, build_viewport,
+    choose_folder, dialogs_for_egui, kv_grid, open_chemical_file, open_settings, status_bar,
+    theme_toggle_button, titlebar_pref,
+};
 use eframe::egui;
 use egui::{Color32, RichText, Sense, Vec2};
+use serde::{Deserialize, Serialize};
 
 use charts::{draw_bioavailability_radar, draw_boiled_egg_interactive};
 use miniapps::{
@@ -31,6 +40,37 @@ use miniapps::{
 };
 use sketcher::{MoleculeSketcher, draw_cached_molecule_2d, draw_cached_molecule_2d_with_som};
 use tutorials::{TutorialAction, TutorialState, built_in_tutorials};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct AdmetPrefs {
+    ui: CommonUiPrefs,
+    show_egg_names: bool,
+    show_som_overlay: bool,
+    export_dir: String,
+}
+
+impl Default for AdmetPrefs {
+    fn default() -> Self {
+        Self {
+            ui: CommonUiPrefs::default(),
+            show_egg_names: true,
+            show_som_overlay: true,
+            export_dir: String::new(),
+        }
+    }
+}
+
+impl Settings for AdmetPrefs {
+    const APP_ID: &'static str = "admetcraft";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogAction {
+    ImportFile,
+    ChooseExportDir,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainTab {
@@ -44,8 +84,12 @@ struct AdmetCraftApp {
     session: AdmetSession,
     mol_cache: HashMap<String, Molecule>,
     sketcher: MoleculeSketcher,
+    settings: SettingsStore<AdmetPrefs>,
+    dialogs: Dialogs<DialogAction>,
     active_tab: MainTab,
     dark_mode: bool,
+    use_system_titlebar: bool,
+    applied_theme: Option<ThemeMode>,
     show_egg_names: bool,
     show_som_overlay: bool,
     pk_potency_nm: f64,
@@ -66,12 +110,22 @@ struct AdmetCraftApp {
 
 impl Default for AdmetCraftApp {
     fn default() -> Self {
-        Self::from_startup_path(None)
+        let ctx = egui::Context::default();
+        let (settings, _report) = SettingsStore::<AdmetPrefs>::open(Location::Memory);
+        Self::from_startup_path(&ctx, settings, None)
     }
 }
 
 impl AdmetCraftApp {
-    fn from_startup_path(startup_file: Option<PathBuf>) -> Self {
+    fn from_startup_path(
+        ctx: &egui::Context,
+        settings: SettingsStore<AdmetPrefs>,
+        startup_file: Option<PathBuf>,
+    ) -> Self {
+        let saved = settings.get().clone();
+        let initial_mode = ThemeMode::from_dark(saved.ui.dark_mode);
+        CraftBioTheme::new(initial_mode, AppAccent::ADMET_EMERALD).apply(ctx);
+
         let mut session = AdmetSession::new();
         let status_msg = if startup_file.is_some() {
             "Loading handoff batch...".to_string()
@@ -87,6 +141,11 @@ impl AdmetCraftApp {
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.display().to_string())
             .or_else(|| {
+                let candidate = saved.export_dir.trim();
+                (!candidate.is_empty() && Path::new(candidate).is_dir())
+                    .then(|| candidate.to_string())
+            })
+            .or_else(|| {
                 std::env::current_dir()
                     .ok()
                     .map(|p| p.display().to_string())
@@ -100,10 +159,14 @@ impl AdmetCraftApp {
             session,
             mol_cache: HashMap::new(),
             sketcher,
+            settings,
+            dialogs: dialogs_for_egui(ctx),
             active_tab: MainTab::Cards,
-            dark_mode: false,
-            show_egg_names: true,
-            show_som_overlay: true,
+            dark_mode: saved.ui.dark_mode,
+            use_system_titlebar: saved.ui.use_system_titlebar,
+            applied_theme: Some(initial_mode),
+            show_egg_names: saved.show_egg_names,
+            show_som_overlay: saved.show_som_overlay,
             pk_potency_nm: 10.0,
             pk_target_fold: 1.0,
             pk_match_trough: true,
@@ -460,42 +523,71 @@ impl AdmetCraftApp {
         });
     }
 
-    /// Open a native Linux file dialog (`zenity` or `kdialog`) without adding external crate deps.
+    /// Queue a non-blocking native file picker via `craft-dialogs`.
     fn browse_import_file(&mut self) {
-        let picked = std::process::Command::new("zenity")
-            .args([
-                "--file-selection",
-                "--title=Import Molecules (.smi, .csv, .sdf)",
-                "--file-filter=Chemical files | *.smi *.smiles *.csv *.sdf *.mol *.txt",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .or_else(|| {
-                std::process::Command::new("kdialog")
-                    .args([
-                        "--getopenfilename",
-                        &self.export_dir,
-                        "*.smi *.smiles *.csv *.sdf *.mol | Chemical files",
-                    ])
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-            });
+        let start = Path::new(&self.export_dir);
+        self.dialogs
+            .ask(open_chemical_file(Some(start)), DialogAction::ImportFile);
+    }
 
-        let Some(output) = picked else {
-            self.status_msg =
-                "File picker cancelled (or install zenity/kdialog, or drag-and-drop a file)"
-                    .to_string();
-            return;
-        };
-        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if raw.is_empty() {
-            return;
+    /// Queue a non-blocking native folder picker for the sandbox export root via `craft-dialogs`.
+    fn browse_export_dir(&mut self) {
+        let start = Path::new(&self.export_dir);
+        self.dialogs.ask(
+            choose_folder("Select Sandbox Export Directory", Some(start)),
+            DialogAction::ChooseExportDir,
+        );
+    }
+
+    /// Apply answers from completed non-blocking native file/folder dialogs.
+    fn process_dialog_answers(&mut self) {
+        for (action, answer) in self.dialogs.take_answers() {
+            match (action, answer) {
+                (DialogAction::ImportFile, Answer::Paths(paths)) => {
+                    if let Some(first) = paths.first() {
+                        self.import_path = first.display().to_string();
+                    }
+                    self.import_dropped_files(&paths);
+                }
+                (DialogAction::ChooseExportDir, Answer::Paths(paths)) => {
+                    if let Some(dir) = paths.into_iter().next() {
+                        self.export_dir = dir.display().to_string();
+                        self.status_msg = format!("Sandbox dir -> {}", self.export_dir);
+                    }
+                }
+                (_, Answer::Cancelled) => {
+                    self.status_msg = "File picker cancelled.".to_string();
+                }
+                (_, Answer::Unavailable(why)) => {
+                    self.status_msg = format!(
+                        "Native dialog unavailable: {why} (drag-and-drop or enter path directly)"
+                    );
+                }
+                (_, Answer::Message(_)) => {}
+            }
         }
-        self.import_path = raw.clone();
-        let path = PathBuf::from(raw);
-        self.import_file_path(&path, true);
+    }
+
+    /// Keep `CraftBioTheme` visuals and `craft-settings` persistence synchronized without
+    /// re-applying style overrides every frame.
+    fn sync_theme_and_prefs(&mut self, ctx: &egui::Context) {
+        let mode = ThemeMode::from_dark(self.dark_mode);
+        if self.applied_theme != Some(mode) {
+            CraftBioTheme::new(mode, AppAccent::ADMET_EMERALD).apply(ctx);
+            self.applied_theme = Some(mode);
+        }
+        self.settings.update(|prefs| {
+            prefs.ui.dark_mode = self.dark_mode;
+            prefs.ui.use_system_titlebar = self.use_system_titlebar;
+            prefs.show_egg_names = self.show_egg_names;
+            prefs.show_som_overlay = self.show_som_overlay;
+            prefs.export_dir.clone_from(&self.export_dir);
+        });
+        let now = Instant::now();
+        let tick = self.settings.tick(now);
+        if let Some(due) = tick.next_deadline {
+            ctx.request_repaint_after(due.saturating_duration_since(now));
+        }
     }
 
     /// Import a `.smi`, `.csv`, or `.sdf` file inside `export_dir` (or the file's parent for
@@ -615,7 +707,7 @@ impl AdmetCraftApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let wants_kb = ctx.wants_keyboard_input();
+        let wants_kb = ctx.egui_wants_keyboard_input();
         let mut open_palette = false;
         let mut run_batch = false;
         let mut load_examples = false;
@@ -661,7 +753,7 @@ impl AdmetCraftApp {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         self.import_dropped_files(&dropped);
@@ -860,24 +952,21 @@ impl AdmetCraftApp {
 }
 
 impl eframe::App for AdmetCraftApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if let Ok(mut guard) = self.async_status.lock()
             && let Some(msg) = guard.take()
         {
             self.status_msg = msg;
         }
 
-        if self.dark_mode {
-            ctx.set_visuals(egui::Visuals::dark());
-        } else {
-            ctx.set_visuals(egui::Visuals::light());
-        }
+        self.process_dialog_answers();
+        self.sync_theme_and_prefs(&ctx);
+        self.handle_shortcuts(&ctx);
+        self.render_palette(&ctx);
 
-        self.handle_shortcuts(ctx);
-        self.render_palette(ctx);
-
-        egui::TopBottomPanel::top("craft_menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+        egui::Panel::top("craft_menu_bar").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.strong("AdmetCraft");
                 ui.label(
                     RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
@@ -889,42 +978,42 @@ impl eframe::App for AdmetCraftApp {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open / Import (.smi, .csv, .sdf)...").clicked() {
                         self.browse_import_file();
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Load 15 Example Drugs (Ctrl+E)").clicked() {
                         self.run_command(Command::LoadExampleBatch);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     ui.menu_button("Export Report", |ui| {
                         if ui.button("CSV Table (admetcraft_report.csv)").clicked() {
-                            self.export(ctx, ExportFormat::Csv, "admetcraft_report.csv");
-                            ui.close_menu();
+                            self.export(&ctx, ExportFormat::Csv, "admetcraft_report.csv");
+                            ui.close();
                         }
                         if ui.button("JSON Full (admetcraft_report.json)").clicked() {
-                            self.export(ctx, ExportFormat::Json, "admetcraft_report.json");
-                            ui.close_menu();
+                            self.export(&ctx, ExportFormat::Json, "admetcraft_report.json");
+                            ui.close();
                         }
                         if ui.button("PDF Report (admetcraft_report.pdf)").clicked() {
-                            self.export(ctx, ExportFormat::Pdf, "admetcraft_report.pdf");
-                            ui.close_menu();
+                            self.export(&ctx, ExportFormat::Pdf, "admetcraft_report.pdf");
+                            ui.close();
                         }
                         if ui
                             .button("BOILED-Egg SVG (admetcraft_boiled_egg.svg)")
                             .clicked()
                         {
                             self.export(
-                                ctx,
+                                &ctx,
                                 ExportFormat::SvgBoiledEgg,
                                 "admetcraft_boiled_egg.svg",
                             );
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                     ui.separator();
                     if ui.button("Clear Session").clicked() {
                         self.run_command(Command::ClearSession);
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -934,20 +1023,20 @@ impl eframe::App for AdmetCraftApp {
                         .clicked()
                     {
                         self.run_command(Command::Undo);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui
                         .add_enabled(self.session.can_redo(), egui::Button::new("Redo (Ctrl+Y)"))
                         .clicked()
                     {
                         self.run_command(Command::Redo);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Run ADMET Batch (Ctrl+Enter)").clicked() {
                         let input = self.session.smiles_input.clone();
                         self.run_command(Command::EvaluateBatchText { input });
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -971,6 +1060,16 @@ impl eframe::App for AdmetCraftApp {
                     ui.separator();
                     ui.checkbox(&mut self.show_som_overlay, "2D Sites of Metabolism Overlay");
                     ui.checkbox(&mut self.dark_mode, "Dark Theme");
+                    if ui
+                        .checkbox(
+                            &mut self.use_system_titlebar,
+                            "Use System Titlebar (applies on restart)",
+                        )
+                        .changed()
+                    {
+                        self.status_msg =
+                            "Window frame preference saved (restart to apply).".to_string();
+                    }
                 });
 
                 ui.menu_button("Mini-Apps", |ui| {
@@ -978,7 +1077,7 @@ impl eframe::App for AdmetCraftApp {
                         let mut open = self.workspace.is_open(meta.id);
                         if ui.checkbox(&mut open, meta.short_label).changed() {
                             self.workspace.toggle(meta.id);
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                     ui.separator();
@@ -989,7 +1088,7 @@ impl eframe::App for AdmetCraftApp {
                         )
                         .changed()
                     {
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui
                         .checkbox(
@@ -999,12 +1098,12 @@ impl eframe::App for AdmetCraftApp {
                         .changed()
                     {
                         self.workspace.show_left_panel = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Cerrar todas las mini-apps flotantes").clicked() {
                         self.workspace.close_all();
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -1013,23 +1112,21 @@ impl eframe::App for AdmetCraftApp {
                         self.palette_open = true;
                         self.palette_query.clear();
                     }
-                    if ui
-                        .small_button(if self.dark_mode { "Light" } else { "Dark" })
-                        .clicked()
-                    {
-                        self.dark_mode = !self.dark_mode;
+                    let mut mode = ThemeMode::from_dark(self.dark_mode);
+                    if theme_toggle_button(ui, &mut mode) {
+                        self.dark_mode = mode.is_dark();
                     }
                     ui.label(
                         RichText::new("Tutoriales · Mini-Apps Móviles · ADMET & PBPK")
                             .small()
                             .strong()
-                            .color(Color32::from_rgb(16, 185, 129)),
+                            .color(AppAccent::ADMET_EMERALD.color32()),
                     );
                 });
             });
         });
 
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+        egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
                     .button(
@@ -1067,20 +1164,24 @@ impl eframe::App for AdmetCraftApp {
                 ui.separator();
                 ui.menu_button("Export ▾", |ui| {
                     if ui.button("CSV").clicked() {
-                        self.export(ctx, ExportFormat::Csv, "admetcraft_report.csv");
-                        ui.close_menu();
+                        self.export(&ctx, ExportFormat::Csv, "admetcraft_report.csv");
+                        ui.close();
                     }
                     if ui.button("JSON").clicked() {
-                        self.export(ctx, ExportFormat::Json, "admetcraft_report.json");
-                        ui.close_menu();
+                        self.export(&ctx, ExportFormat::Json, "admetcraft_report.json");
+                        ui.close();
                     }
                     if ui.button("PDF").clicked() {
-                        self.export(ctx, ExportFormat::Pdf, "admetcraft_report.pdf");
-                        ui.close_menu();
+                        self.export(&ctx, ExportFormat::Pdf, "admetcraft_report.pdf");
+                        ui.close();
                     }
                     if ui.button("BOILED-Egg SVG").clicked() {
-                        self.export(ctx, ExportFormat::SvgBoiledEgg, "admetcraft_boiled_egg.svg");
-                        ui.close_menu();
+                        self.export(
+                            &ctx,
+                            ExportFormat::SvgBoiledEgg,
+                            "admetcraft_boiled_egg.svg",
+                        );
+                        ui.close();
                     }
                 });
                 ui.separator();
@@ -1119,7 +1220,7 @@ impl eframe::App for AdmetCraftApp {
         });
 
         // Floating Mini-Application Launcher Bar (1-click movable, resizable & expandable windows)
-        egui::TopBottomPanel::top("admet_miniapp_bar").show(ctx, |ui| {
+        egui::Panel::top("admet_miniapp_bar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Mini-Apps:");
                 for meta in ALL_MINI_APPS {
@@ -1174,37 +1275,50 @@ impl eframe::App for AdmetCraftApp {
             });
         });
 
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+        let mut pick_export_dir = false;
+        status_bar(
+            ui,
+            "status_bar",
+            |ui| {
                 ui.label(format!(
                     "Molecules: {}  |  Errors: {}  |  {}",
                     self.session.evaluations.len(),
                     self.session.failures.len(),
                     self.status_msg
                 ));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("AdmetCraft v{}", env!("CARGO_PKG_VERSION")))
-                            .small()
-                            .strong(),
-                    );
-                    ui.separator();
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.export_dir)
-                            .desired_width(180.0)
-                            .hint_text("Sandbox dir"),
-                    );
-                    ui.label("Sandbox dir:");
-                });
-            });
-        });
+            },
+            |ui| {
+                ui.label(
+                    RichText::new(format!("AdmetCraft v{}", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .strong(),
+                );
+                ui.separator();
+                if ui
+                    .small_button("Choose...")
+                    .on_hover_text("Select sandbox export folder")
+                    .clicked()
+                {
+                    pick_export_dir = true;
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.export_dir)
+                        .desired_width(180.0)
+                        .hint_text("Sandbox dir"),
+                );
+                ui.label("Sandbox dir:");
+            },
+        );
+        if pick_export_dir {
+            self.browse_export_dir();
+        }
 
         if self.workspace.show_left_panel {
             if self.workspace.left_panel_floating {
-                let screen = ctx.screen_rect();
+                let screen = ctx.content_rect();
                 let mut open = self.workspace.show_left_panel;
                 egui::Window::new("✏ Editor 2D y Lista SMILES (Panel Flotante)")
-                    .id(egui::Id::new("admet_floating_input_panel"))
+                    .id(egui::Id::unique("admet_floating_input_panel"))
                     .open(&mut open)
                     .movable(true)
                     .resizable(true)
@@ -1212,18 +1326,18 @@ impl eframe::App for AdmetCraftApp {
                     .default_pos(clamped_window_pos(screen, [24.0, 108.0]))
                     .default_size([390.0, 620.0])
                     .min_size([300.0, 360.0])
-                    .show(ctx, |ui| self.render_input_panel_contents(ui));
+                    .show(&ctx, |ui| self.render_input_panel_contents(ui));
                 self.workspace.show_left_panel = open;
             } else {
-                egui::SidePanel::left("input_panel")
+                egui::Panel::left("input_panel")
                     .resizable(true)
-                    .default_width(360.0)
-                    .min_width(280.0)
-                    .show(ctx, |ui| self.render_input_panel_contents(ui));
+                    .default_size(360.0)
+                    .min_size(280.0)
+                    .show(ui, |ui| self.render_input_panel_contents(ui));
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.active_tab, MainTab::Cards, "Molecule Cards");
                 ui.selectable_value(
@@ -1301,14 +1415,19 @@ impl eframe::App for AdmetCraftApp {
             }
         });
 
-        self.render_floating_mini_apps(ctx);
+        self.render_floating_mini_apps(&ctx);
+        self.dialogs.show_pending(Some(frame));
+    }
+
+    fn on_exit(&mut self) {
+        let _ = self.settings.flush();
     }
 }
 
 impl AdmetCraftApp {
     fn render_floating_mini_apps(&mut self, ctx: &egui::Context) {
         let open_list: Vec<MiniAppId> = self.workspace.open_apps.iter().copied().collect();
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
 
         for id in open_list {
             let meta = mini_app_meta(id);
@@ -1317,7 +1436,7 @@ impl AdmetCraftApp {
             let mut toggle_expand = false;
 
             let mut win = egui::Window::new(meta.window_title)
-                .id(egui::Id::new(("admet_miniapp_win", id)))
+                .id(egui::Id::unique(("admet_miniapp_win", id)))
                 .open(&mut is_open)
                 .movable(true)
                 .resizable(true)
@@ -1922,9 +2041,12 @@ impl AdmetCraftApp {
                     ui.label("Directorio sandbox:");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.export_dir)
-                            .desired_width(300.0)
+                            .desired_width(260.0)
                             .hint_text("/ruta/de/salida"),
                     );
+                    if ui.button("Elegir...").clicked() {
+                        self.browse_export_dir();
+                    }
                 });
                 ui.add_space(4.0);
                 let ctx_clone = ui.ctx().clone();
@@ -3151,19 +3273,6 @@ fn render_admet_sections(ui: &mut egui::Ui, e: &MoleculeEvaluation) {
     render_safety_alerts_section(ui, e, true);
 }
 
-fn kv_grid(ui: &mut egui::Ui, id: &str, rows: &[(&str, String)]) {
-    egui::Grid::new(id)
-        .striped(true)
-        .spacing([20.0, 4.0])
-        .show(ui, |ui| {
-            for (k, v) in rows {
-                ui.label(*k);
-                ui.strong(v);
-                ui.end_row();
-            }
-        });
-}
-
 fn fmt_rule(r: &admet_calc::RuleResult) -> String {
     if r.details.is_empty() {
         format!("{}; {} violations", yes_no(r.pass), r.violations)
@@ -3186,20 +3295,30 @@ fn main() -> Result<(), eframe::Error> {
         .nth(1)
         .map(PathBuf::from)
         .filter(|p| p.is_file());
+    let (settings, _load_report) = open_settings::<AdmetPrefs>();
+    let use_system_titlebar = settings.get().ui.use_system_titlebar;
     let title = format!(
         "AdmetCraft v{} — Local-First ADMET Workbench",
         env!("CARGO_PKG_VERSION")
     );
+    let win_cfg = WindowConfig::new(&title, "AdmetCraft", "ADMETCRAFT")
+        .with_size([1280.0, 820.0], [960.0, 640.0])
+        .with_titlebar_pref(titlebar_pref(use_system_titlebar));
+    let (viewport, _decision) = build_viewport(&win_cfg);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([1280.0, 820.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
         "AdmetCraft",
         options,
-        Box::new(move |_cc| Ok(Box::new(AdmetCraftApp::from_startup_path(startup_file)))),
+        Box::new(move |cc| {
+            Ok(Box::new(AdmetCraftApp::from_startup_path(
+                &cc.egui_ctx,
+                settings,
+                startup_file,
+            )))
+        }),
     )
 }
 
@@ -3214,5 +3333,20 @@ mod tests {
         assert!(!sk.cached_smiles.is_empty());
         assert_eq!(sk.mol.heavy_atom_count(), 13);
         Ok(())
+    }
+
+    #[test]
+    fn admet_prefs_store_updates_in_memory() {
+        let (mut store, _report) = SettingsStore::<AdmetPrefs>::open(Location::Memory);
+        assert!(!store.get().ui.dark_mode);
+        assert!(store.get().show_som_overlay);
+        assert!(store.update(|p| {
+            p.ui.dark_mode = true;
+            p.show_egg_names = false;
+            p.export_dir = "/tmp/admet_exports".to_string();
+        }));
+        assert!(store.get().ui.dark_mode);
+        assert!(!store.get().show_egg_names);
+        assert_eq!(store.get().export_dir, "/tmp/admet_exports");
     }
 }
